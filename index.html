@@ -1,9 +1,23 @@
 <!doctype html>
-<html lang="zh-CN">
+<html lang="zh-CN" class="dark">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <title>ZEX TV</title>
+    <script>
+      // 首帧定色 —— 电视版固定深色（无主题切换）。同步执行早于 CSS 加载，
+      // 避免白屏闪过。localStorage 镜像与桌面版共用 key，无则默认深色。
+      (function () {
+        try {
+          var t = localStorage.getItem('zex-theme');
+          var dark = t !== 'light';
+          document.documentElement.classList.toggle('dark', dark);
+          document.documentElement.style.background = '#080810';
+        } catch (e) {
+          document.documentElement.style.background = '#080810';
+        }
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>

@@ -26,7 +26,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; img-src 'self' data: https: http://covers.localhost; style-src 'self' 'unsafe-inline'; connect-src 'self' ipc: http://ipc.localhost http://tauri.localhost https://api.tmdb.org https://*.tmdb.org https://*.themoviedb.org"
+      "csp": "default-src 'self'; script-src 'self' 'unsafe-inline'; img-src 'self' data: https: http://covers.localhost; style-src 'self' 'unsafe-inline'; connect-src 'self' ipc: http://ipc.localhost http://tauri.localhost http://covers.localhost https://api.tmdb.org https://*.tmdb.org https://*.themoviedb.org"
     }
   },
   "bundle": {

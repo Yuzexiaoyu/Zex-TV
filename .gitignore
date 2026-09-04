@@ -3,9 +3,29 @@ src-tauri/target/
 src-tauri/.cargo/
 .cargo/
 
-# Android 生成工程（tauri android init 可重建）
-src-tauri/gen/android/
+# Android 生成工程（tauri android init 可重建）。
+# 注意用 /* 逐层否定而非整目录忽略：git 不允许「目录被忽略后其中的文件再排除」，
+# 而 MainActivity.kt 是手改的（遥控器按键→WebView 转发、Back→Escape），
+# tauri android init 重新生成不带这些改动，必须纳入版本控制
+src-tauri/gen/android/*
+!src-tauri/gen/android/app/
+src-tauri/gen/android/app/*
+!src-tauri/gen/android/app/src/
+src-tauri/gen/android/app/src/*
+!src-tauri/gen/android/app/src/main/
+src-tauri/gen/android/app/src/main/*
+!src-tauri/gen/android/app/src/main/java/
+src-tauri/gen/android/app/src/main/java/*
+!src-tauri/gen/android/app/src/main/java/com/
+src-tauri/gen/android/app/src/main/java/com/*
+!src-tauri/gen/android/app/src/main/java/com/zex/
+src-tauri/gen/android/app/src/main/java/com/zex/*
+!src-tauri/gen/android/app/src/main/java/com/zex/tv/
 src-tauri/gen/schemas/
+
+# 产物与本地工具状态
+ZEX-TV.apk
+.freebuff/
 
 # Node
 node_modules

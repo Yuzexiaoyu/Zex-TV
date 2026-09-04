@@ -1,0 +1,1477 @@
+@import "tailwindcss";
+
+@theme {
+  /* 电视版固定深色，light 块保留仅为兼容；实际 .dark 常驻 */
+  --color-bg-base: #080810;
+  --color-bg-surface: rgba(255, 255, 255, 0.05);
+  --color-bg-surface-hover: rgba(255, 255, 255, 0.08);
+  --color-bg-surface-active: rgba(255, 255, 255, 0.12);
+  --color-border-glass: rgba(255, 255, 255, 0.08);
+  --color-border-glass-hover: rgba(255, 255, 255, 0.16);
+  --color-border-accent: rgba(0, 212, 255, 0.4);
+  --color-accent: #00d4ff;
+  --color-accent-dim: rgba(0, 212, 255, 0.15);
+  --color-text-primary: #ffffff;
+  --color-text-secondary: rgba(255, 255, 255, 0.5);
+  --color-text-tertiary: rgba(255, 255, 255, 0.3);
+  --color-success: #10b981;
+  --color-danger: #ef4444;
+  --color-warning: #f59e0b;
+}
+
+/* dark 覆盖（index.html 已在 <html> 预置 class="dark"） */
+.dark {
+  --color-bg-base: #080810;
+  --color-bg-surface: rgba(255, 255, 255, 0.05);
+  --color-bg-surface-hover: rgba(255, 255, 255, 0.08);
+  --color-bg-surface-active: rgba(255, 255, 255, 0.12);
+  --color-border-glass: rgba(255, 255, 255, 0.08);
+  --color-border-glass-hover: rgba(255, 255, 255, 0.16);
+  --color-border-accent: rgba(0, 212, 255, 0.4);
+  --color-text-primary: #ffffff;
+  --color-text-secondary: rgba(255, 255, 255, 0.5);
+  --color-text-tertiary: rgba(255, 255, 255, 0.3);
+}
+
+/* 不要加 `* { padding: 0 }` 这类无层级规则——会覆盖 @layer utilities 里所有
+   Tailwind padding 工具类。Tailwind preflight 已自带 margin/padding 重置 */
+
+/* ─── 全局缩放（电视适配） ─────────────────────
+   桌面版尺寸是按显示器定的，搬到电视上整体偏大——海信 GX27 的 CSS 视口远小于
+   1920，同样的 18px 字和 80px 导航条占的屏幕比例就翻倍。
+
+   曾用 `html{zoom:.82}`：zoom 缩的是整个 100%×100% 的 html 盒子，缩完不会重新
+   铺满视口，右侧和底部各留 18% 黑边——电视上表现为「只有左上角一大块有画面」。
+
+   现在改成固定设计画布 + 等比缩放铺满：#root 宽固定 1920（设计基准），高按
+   缩放比反算实际视口高，scale 后正好铺满、不留黑边也不裁切。元素看起来多大只由
+   画布宽度决定，与设备像素密度无关；要整体调大/调小只改 main.tsx 的 DESIGN_W。
+
+   transform 会成为后代 fixed 元素的包含块，所以那 6 处 `fixed inset-0` 遮罩正好
+   覆盖整块画布、不会错位。但 vh/vw 仍按物理视口算，画布内一律不用 vh/vw
+   （原有 max-h-[88vh] / max-w-[70vw] 已改成百分比）。 */
+#root {
+  width: var(--tv-w, 100%);
+  height: var(--tv-h, 100%);
+  transform: scale(var(--tv-scale, 1));
+  transform-origin: top left;
+  overflow: hidden;
+}
+
+html, body {
+  height: 100%;
+  width: 100%;
+  overflow: hidden;
+}
+
+body {
+  font-family: 'Segoe UI Variable', 'Segoe UI', system-ui, -apple-system, sans-serif;
+  background: var(--color-bg-base);
+  color: var(--color-text-primary);
+  font-size: 18px;
+  -webkit-font-smoothing: antialiased;
+  user-select: none;
+  transition: background-color 0.3s, color 0.3s;
+}
+
+/* ─── Ambient Background ───────────────────── */
+.bg-ambient {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  background:
+    radial-gradient(ellipse 60% 50% at 20% 20%, rgba(0, 100, 180, 0.12) 0%, transparent 70%),
+    radial-gradient(ellipse 50% 60% at 80% 80%, rgba(100, 0, 180, 0.08) 0%, transparent 70%),
+    radial-gradient(ellipse 40% 40% at 50% 50%, rgba(0, 60, 120, 0.06) 0%, transparent 70%);
+  animation: ambient-drift 20s ease-in-out infinite;
+}
+
+@keyframes ambient-drift {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.7; transform: scale(1.05); }
+}
+
+/* ─── Glass Morphism ───────────────────────── */
+.glass {
+  background: var(--color-bg-surface);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid var(--color-border-glass);
+  transition: background 0.3s, border-color 0.3s;
+}
+
+.glass-card {
+  background: rgba(13, 15, 28, 0.97);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid var(--color-border-glass-hover);
+  border-radius: 16px;
+  transition: box-shadow 0.3s, transform 0.3s, background 0.3s;
+}
+
+.glass-modal {
+  background: rgba(10, 10, 20, 0.94);
+  backdrop-filter: blur(24px);
+  -webkit-backdrop-filter: blur(24px);
+  border: 1px solid var(--color-border-glass);
+  border-radius: 16px;
+  transition: background 0.3s;
+}
+
+.solid-modal {
+  background: #0d0f1c;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+/* ─── Glow Effects ─────────────────────────── */
+.glow-accent {
+  box-shadow: 0 0 20px var(--color-accent-dim), 0 0 40px rgba(0, 212, 255, 0.08);
+}
+
+.text-glow-accent {
+  text-shadow: 0 0 20px var(--color-accent-dim);
+}
+
+/* ─── Scrollbar（电视远距离可视，加粗） ─────── */
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.18);
+  border-radius: 5px;
+}
+.dark ::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.18); }
+::-webkit-scrollbar-thumb:hover { background: var(--color-accent); }
+
+/* ─── Focus ────────────────────────────────── */
+/* 电视版焦点非常醒目：3px outline + 强辉光，用户全靠焦点定位 */
+:focus-visible {
+  outline: 3px solid var(--color-accent);
+  outline-offset: 2px;
+}
+
+.gamepad-focus {
+  outline: 3px solid var(--color-accent);
+  outline-offset: 2px;
+  box-shadow: 0 0 0 3px rgba(0, 212, 255, 0.22), 0 0 12px rgba(0, 212, 255, 0.3);
+}
+
+/* ─── Animations ───────────────────────────── */
+@keyframes fade-up {
+  from { opacity: 0; transform: translateY(16px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@keyframes fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+@keyframes scale-in {
+  from { opacity: 0; transform: scale(0.95); }
+  to { opacity: 1; transform: scale(1); }
+}
+@keyframes float {
+  0%, 100% { transform: translateY(0px); }
+  50% { transform: translateY(-4px); }
+}
+@keyframes card-enter {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.animate-fade-up { animation: fade-up 0.35s cubic-bezier(0.22, 1, 0.36, 1) forwards; }
+.animate-fade-in { animation: fade-in 0.25s ease-out forwards; }
+.animate-scale-in { animation: scale-in 0.25s cubic-bezier(0.22, 1, 0.36, 1) forwards; }
+
+[data-skip-animations] .animate-fade-up,
+[data-skip-animations] .animate-scale-in,
+[data-skip-animations] .hero-bg,
+[data-skip-animations] .hero-content { animation: none !important; }
+
+/* ─── Buttons ──────────────────────────────── */
+@layer base {
+  button:not(:disabled) { cursor: pointer; }
+  button:disabled { cursor: not-allowed; }
+}
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 10px 18px;
+  border-radius: 12px;
+  font-size: 16px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s cubic-bezier(0.22, 1, 0.36, 1);
+  border: none;
+  white-space: nowrap;
+}
+
+.btn:active { transform: scale(0.96); }
+
+.btn-glass {
+  background: var(--color-bg-surface);
+  border: 1px solid var(--color-border-glass);
+  color: var(--color-text-secondary);
+}
+.btn-glass:hover {
+  background: var(--color-bg-surface-hover);
+  border-color: var(--color-border-glass-hover);
+  color: var(--color-text-primary);
+}
+
+.btn-accent {
+  background: var(--color-accent);
+  color: #000;
+  font-weight: 600;
+  box-shadow: 0 0 20px rgba(0, 212, 255, 0.25);
+}
+.btn-accent:hover {
+  background: #33ddff;
+  box-shadow: 0 0 30px rgba(0, 212, 255, 0.4);
+  transform: translateY(-1px);
+}
+
+.btn-danger {
+  background: rgba(239, 68, 68, 0.12);
+  border: 1px solid rgba(239, 68, 68, 0.35);
+  color: #ef4444;
+}
+.btn-danger:hover {
+  background: rgba(239, 68, 68, 0.2);
+  border-color: rgba(239, 68, 68, 0.55);
+  color: #fca5a5;
+}
+
+/* ─── Nav Pills（电视版放大，适合遥控器） ──── */
+.nav-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 24px;
+  border-radius: 100px;
+  font-size: 18px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s cubic-bezier(0.22, 1, 0.36, 1);
+  border: 1px solid transparent;
+  color: var(--color-text-secondary);
+  background: transparent;
+}
+
+.nav-pill:hover {
+  background: var(--color-bg-surface);
+  border-color: var(--color-border-glass);
+  color: var(--color-text-primary);
+}
+
+.nav-pill.active {
+  background: rgba(0, 212, 255, 0.12);
+  border-color: var(--color-border-accent);
+  color: var(--color-accent);
+  box-shadow: 0 0 16px rgba(0, 212, 255, 0.1);
+}
+
+.nav-pill.gamepad-focus {
+  background: rgba(0, 212, 255, 0.2);
+  border-color: var(--color-border-accent);
+  color: var(--color-accent);
+}
+
+/* ─── Badge ────────────────────────────────── */
+.badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 10px;
+  border-radius: 100px;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  background: var(--color-bg-surface-hover);
+  color: var(--color-text-secondary);
+  border: 1px solid var(--color-border-glass);
+}
+
+.badge-accent {
+  background: rgba(0, 212, 255, 0.15);
+  color: var(--color-accent);
+  border-color: var(--color-border-accent);
+}
+
+/* ─── Inputs ───────────────────────────────── */
+.input {
+  width: 100%;
+  padding: 12px 16px;
+  border-radius: 12px;
+  font-size: 18px;
+  background: var(--color-bg-surface);
+  border: 1px solid var(--color-border-glass);
+  color: var(--color-text-primary);
+  transition: border-color 0.2s, box-shadow 0.2s, background 0.3s;
+  outline: none;
+}
+
+.input::placeholder { color: var(--color-text-tertiary); }
+.input:focus {
+  border-color: var(--color-accent);
+  box-shadow: 0 0 0 3px rgba(0, 212, 255, 0.12);
+}
+
+.search-input { padding-left: 44px; }
+
+/* ─── Chip（电视版放大） ───────────────────── */
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 8px 18px;
+  border-radius: 100px;
+  font-size: 16px;
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+  color: var(--color-text-secondary);
+  background: var(--color-bg-surface);
+  border: 1px solid var(--color-border-glass);
+  transition: all 0.2s cubic-bezier(0.22, 1, 0.36, 1);
+}
+.chip:hover {
+  color: var(--color-text-primary);
+  border-color: var(--color-border-glass-hover);
+}
+.chip.active {
+  background: rgba(0, 212, 255, 0.16);
+  border-color: var(--color-border-accent);
+  color: var(--color-accent);
+  box-shadow: 0 0 16px rgba(0, 212, 255, 0.14);
+}
+
+/* 评分徽标（TMDB） */
+.rating-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 12px;
+  border-radius: 100px;
+  font-size: 14px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: #ffc94d;
+  background: rgba(255, 201, 77, 0.14);
+  border: 1px solid rgba(255, 201, 77, 0.3);
+}
+
+/* ─── Hero 横幅 ────────────────────────────── */
+/* 电视屏幕大，hero 加高到 420px */
+.hero {
+  position: relative;
+  height: 420px;
+  display: flex;
+  align-items: flex-end;
+  overflow: hidden;
+  isolation: isolate;
+  background: #080810;
+}
+
+.hero-bg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  object-position: center 18%;
+  z-index: 0;
+  transform: scale(1.02);
+  will-change: transform, opacity;
+  backface-visibility: hidden;
+  animation: hero-in 0.55s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+.hero-bg-poster {
+  filter: blur(26px) saturate(1.15);
+  transform: scale(1.25);
+}
+
+@keyframes hero-in {
+  from { opacity: 0; transform: scale(1.08); }
+  to { opacity: 1; transform: scale(1.02); }
+}
+
+.hero-shade {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  transform: translateZ(0);
+  backface-visibility: hidden;
+  background:
+    linear-gradient(to right, rgba(8, 8, 16, 0.94) 0%, rgba(8, 8, 16, 0.72) 42%, rgba(8, 8, 16, 0.15) 100%),
+    linear-gradient(to top, var(--color-bg-base) 1%, rgba(8, 8, 16, 0.25) 45%, transparent 100%);
+}
+
+.hero-content {
+  position: relative;
+  z-index: 2;
+  padding: 48px 36px 34px;
+  max-width: 880px;
+  max-height: 100%;
+  overflow: hidden;
+  animation: fade-up 0.3s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+/* 电视版 hero-title 48px */
+.hero-title {
+  font-size: 48px;
+  line-height: 1.08;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  color: #fff;
+  text-shadow: 0 4px 30px rgba(0, 0, 0, 0.5);
+  display: -webkit-box;
+  -webkit-line-clamp: 1;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  word-break: break-all;
+}
+
+.hero-meta {
+  margin-top: 14px;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px 16px;
+  font-size: 16px;
+  color: var(--color-text-secondary);
+}
+.hero-meta-item { position: relative; }
+.hero-meta-item + .hero-meta-item::before {
+  content: '';
+  position: absolute;
+  left: -9px;
+  top: 50%;
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: currentColor;
+  opacity: 0.5;
+  transform: translateY(-50%);
+}
+
+.hero-overview {
+  margin-top: 16px;
+  max-width: 720px;
+  font-size: 17px;
+  line-height: 1.75;
+  color: var(--color-text-secondary);
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+/* ─── 海报墙 ───────────────────────────────── */
+/* 电视屏幕远，海报加大到 minmax(200px,1fr) */
+.poster-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 22px;
+}
+
+.poster-card {
+  position: relative;
+  cursor: pointer;
+  animation: card-enter 0.3s cubic-bezier(0.2, 0, 0, 1) both;
+}
+.poster-card:hover { z-index: 2; }
+
+.poster-frame {
+  position: relative;
+  height: 100%;
+  aspect-ratio: 2 / 3;
+  border-radius: 14px;
+  overflow: hidden;
+  background: #0e1018;
+  border: 1px solid var(--color-border-glass);
+  transition: box-shadow 0.3s ease, border-color 0.3s ease;
+}
+
+.poster-card:hover .poster-frame {
+  border-color: rgba(0, 212, 255, 0.45);
+  box-shadow:
+    inset 0 0 0 1px rgba(0, 212, 255, 0.35),
+    0 18px 38px rgba(0, 0, 0, 0.45),
+    0 0 22px rgba(0, 212, 255, 0.12);
+}
+
+/* 底部渐变：常驻层 */
+.poster-frame::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 45%;
+  background: linear-gradient(to top, rgba(0, 0, 0, 0.92) 0%, rgba(0, 0, 0, 0.55) 55%, transparent 100%);
+  z-index: 1;
+  pointer-events: none;
+}
+
+.poster-img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+  transition: filter 0.3s ease;
+}
+.poster-card:hover .poster-img {
+  filter: brightness(0.92) saturate(1.02);
+}
+
+/* 右下角徽标组 */
+.poster-badges {
+  position: absolute;
+  bottom: 10px;
+  right: 10px;
+  z-index: 3;
+  pointer-events: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  transition: opacity 0.25s ease;
+}
+.poster-card:hover .poster-ring,
+.poster-card:hover .poster-badges { opacity: 0; }
+
+.poster-done {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 10px;
+  border-radius: 100px;
+  font-size: 13px;
+  font-weight: 600;
+  color: #34d399;
+  background: rgba(0, 0, 0, 0.7);
+  border: 1px solid rgba(52, 211, 153, 0.32);
+}
+
+/* 右下角观看进度环 */
+.poster-ring {
+  position: absolute;
+  right: 10px;
+  bottom: 10px;
+  z-index: 3;
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.62);
+  transition: opacity 0.25s ease;
+}
+.poster-ring svg { width: 100%; height: 100%; display: block; transform: rotate(-90deg); }
+.poster-ring-track { fill: none; stroke: rgba(255, 255, 255, 0.2); stroke-width: 3; }
+.poster-ring-fill {
+  fill: none;
+  stroke: var(--color-accent);
+  stroke-width: 3;
+  stroke-linecap: round;
+}
+.poster-ring-text {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+}
+.poster-ring-text b { font-size: 10px; font-weight: 700; }
+.poster-ring-text i {
+  font-style: normal;
+  font-size: 7px;
+  font-weight: 600;
+  margin-top: 2px;
+  color: #9ae6ff;
+}
+
+/* 电视版焦点：青色选中框（内侧粗描边 + 底部投影 + 外扩光晕 + 图片微提亮）。
+   电视用户全靠焦点定位，比桌面版更醒目 */
+.poster-card.gamepad-focus { z-index: 3; outline: none; box-shadow: none; }
+.poster-card.gamepad-focus .poster-frame {
+  border-color: rgba(0, 212, 255, 0.9);
+  box-shadow:
+    inset 0 0 0 5px var(--color-accent),
+    0 0 0 3px rgba(0, 212, 255, 0.3),
+    0 20px 44px rgba(0, 0, 0, 0.5),
+    0 0 32px rgba(0, 212, 255, 0.4);
+}
+.poster-card.gamepad-focus .poster-img {
+  filter: brightness(1.08) saturate(1.04);
+}
+
+.poster-caption {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 3;
+  pointer-events: none;
+  padding: 28px 48px 13px 13px;
+  transition: opacity 0.3s;
+}
+.poster-card:hover .poster-caption { opacity: 0; }
+
+/* 电视版 poster-name 16px */
+.poster-name {
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 1.35;
+  color: #fff;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.poster-sub {
+  margin-top: 4px;
+  font-size: 13px;
+  color: rgba(255, 255, 255, 0.55);
+}
+
+/* ─── 影院式详情页 v2（电视左右分栏） ─────────
+   结构：左栏固定（海报/信息/操作列），右栏季列表+集列表各自滚动。
+   性能约束：整页不滚动（只有列表内部滚）、行元素无入场动画、
+   transition 只挂焦点相关属性（电视 GPU 弱，all 会卡）。 */
+.detail2-root {
+  position: relative;
+  height: 100%;
+  overflow: hidden;
+}
+
+/* 背景：absolute 单层 + 渐变压暗（不随内容滚，无重绘） */
+.detail2-backdrop {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  z-index: 0;
+}
+.detail2-backdrop img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  object-position: center 20%;
+}
+.detail2-backdrop-fade {
+  position: absolute;
+  inset: 0;
+  background:
+    linear-gradient(to top, var(--color-bg-base) 4%, rgba(8, 8, 16, 0.6) 50%, rgba(8, 8, 16, 0.42) 100%),
+    linear-gradient(to right, rgba(8, 8, 16, 0.92) 0%, rgba(8, 8, 16, 0.55) 55%, rgba(8, 8, 16, 0.35) 100%);
+}
+.detail2-backdrop-fallback {
+  background: linear-gradient(180deg, #0d0d2b 0%, rgba(13, 13, 43, 0.55) 45%, transparent 100%);
+}
+
+/* 左右分栏：左 40% 信息 + 右 60% 列表 */
+.detail2-grid {
+  position: relative;
+  z-index: 1;
+  height: 100%;
+  display: grid;
+  grid-template-columns: minmax(0, 40fr) minmax(0, 60fr);
+  gap: 26px;
+  padding: 26px 30px;
+}
+
+/* ── 左栏 ── */
+.detail2-left {
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+.detail2-poster-wrap { flex-shrink: 0; }
+.detail2-poster {
+  width: 200px;
+  aspect-ratio: 2 / 3;
+  object-fit: cover;
+  border-radius: 14px;
+  border: 1px solid var(--color-border-glass);
+  box-shadow: 0 24px 50px rgba(0, 0, 0, 0.5);
+  display: block;
+}
+.detail2-poster-fallback {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: linear-gradient(135deg, #2a1a4e 0%, #0d0d2b 100%);
+}
+
+.detail2-info { min-height: 0; flex: 1; }
+.detail2-title {
+  font-size: 34px;
+  line-height: 1.15;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  color: #fff;
+  text-shadow: 0 4px 30px rgba(0, 0, 0, 0.5);
+}
+.detail2-aliases {
+  margin-top: 4px;
+  font-size: 15px;
+  color: rgba(255, 255, 255, 0.5);
+}
+.detail2-meta {
+  margin-top: 10px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 10px;
+  font-size: 14px;
+  color: rgba(255, 255, 255, 0.72);
+}
+.detail2-meta-item + .detail2-meta-item::before {
+  content: '·';
+  margin-right: 10px;
+  color: rgba(255, 255, 255, 0.3);
+}
+.detail2-overview {
+  margin-top: 12px;
+  max-height: 150px;
+  overflow-y: auto;
+  font-size: 14px;
+  line-height: 1.65;
+  color: rgba(255, 255, 255, 0.78);
+}
+.detail2-overview-empty { color: rgba(255, 255, 255, 0.45); }
+
+.detail2-progress {
+  margin-top: 14px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  max-width: 420px;
+}
+.detail2-progress-bar {
+  flex: 1;
+  height: 7px;
+  border-radius: 100px;
+  background: rgba(255, 255, 255, 0.14);
+  overflow: hidden;
+}
+.detail2-progress-fill {
+  height: 100%;
+  border-radius: 100px;
+  background: #00d4ff;
+  box-shadow: 0 0 10px rgba(0, 212, 255, 0.55);
+}
+.detail2-progress-text {
+  font-size: 13px;
+  color: rgba(255, 255, 255, 0.6);
+  white-space: nowrap;
+}
+
+/* 左栏操作列：纵向四键（播放/收藏/元数据/删除） */
+.detail2-actions {
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-width: 340px;
+}
+.detail2-btn {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 13px 18px;
+  border-radius: 12px;
+  font-size: 16px;
+  font-weight: 600;
+  cursor: pointer;
+  border: 1px solid var(--color-border-glass);
+  background: rgba(13, 15, 28, 0.72);
+  color: var(--color-text-primary);
+  white-space: nowrap;
+  transition: border-color 0.15s, background 0.15s, box-shadow 0.15s;
+}
+.detail2-btn.primary {
+  background: var(--color-accent);
+  color: #000;
+  border-color: transparent;
+  box-shadow: 0 0 20px rgba(0, 212, 255, 0.25);
+}
+.detail2-btn.danger {
+  color: #ef4444;
+  border-color: rgba(239, 68, 68, 0.35);
+  background: rgba(239, 68, 68, 0.1);
+}
+.detail2-btn.fav-on {
+  color: #ffd75e;
+  border-color: rgba(255, 215, 94, 0.4);
+  background: rgba(255, 215, 94, 0.1);
+}
+.detail2-btn-sub {
+  margin-left: auto;
+  font-size: 13px;
+  opacity: 0.75;
+  font-weight: 500;
+}
+
+/* ── 右栏：季面板 + 集面板 ── */
+.detail2-right {
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+.detail2-seasons {
+  flex-shrink: 0;
+  max-height: 34%;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.detail2-eps {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.detail2-panel-head {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 4px 8px;
+}
+.detail2-panel-title {
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--color-text-primary);
+}
+.detail2-panel-tools {
+  margin-left: auto;
+  display: flex;
+  gap: 8px;
+}
+.detail2-tool {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 12px;
+  border-radius: 9px;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  color: var(--color-text-secondary);
+  background: var(--color-bg-surface);
+  border: 1px solid var(--color-border-glass);
+  transition: border-color 0.15s, background 0.15s;
+}
+.detail2-tool:hover {
+  color: var(--color-text-primary);
+  border-color: var(--color-border-glass-hover);
+}
+
+/* 两个滚动列表：四周留 6px + scroll-padding，否则 .gamepad-focus 的
+   outline/辉光会被滚动口边缘硬切、scrollIntoView 后贴边更明显（同设置页 NAS 列表） */
+.detail2-seasons-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 6px;
+  scroll-padding: 6px;
+}
+.detail2-eps-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 6px;
+  scroll-padding: 6px;
+}
+.detail2-eps-empty {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  color: var(--color-text-secondary);
+  font-size: 15px;
+}
+
+/* 季行：序号 + 名称 + 看/共 + 迷你进度条 */
+.season-row2 {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 11px 16px;
+  border-radius: 12px;
+  cursor: pointer;
+  text-align: left;
+  background: rgba(255, 255, 255, 0.035);
+  border: 1px solid var(--color-border-glass);
+  transition: border-color 0.15s, background 0.15s;
+}
+.season-row2.active {
+  background: rgba(0, 212, 255, 0.1);
+  border-color: rgba(0, 212, 255, 0.45);
+}
+.season-row2-num {
+  width: 30px;
+  height: 30px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 9px;
+  font-size: 14px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: var(--color-text-secondary);
+  background: rgba(255, 255, 255, 0.06);
+}
+.season-row2.active .season-row2-num {
+  color: var(--color-accent);
+  background: rgba(0, 212, 255, 0.14);
+}
+.season-row2-body {
+  min-width: 0;
+  flex: 1;
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+}
+.season-row2-name {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--color-text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.season-row2-name.done { color: #34d399; }
+.season-row2-count {
+  font-size: 13px;
+  color: var(--color-text-tertiary);
+}
+.season-row2-bar {
+  width: 64px;
+  height: 4px;
+  flex-shrink: 0;
+  border-radius: 100px;
+  background: rgba(255, 255, 255, 0.1);
+  overflow: hidden;
+}
+.season-row2-bar-fill {
+  display: block;
+  height: 100%;
+  border-radius: 100px;
+  background: #34d399;
+}
+
+/* 集行：序号 + 标题/元信息 + 状态徽标（无剧照——
+   428 张 w342 图在电视 WebView 上解码 + 滚动是旧版卡顿主因，
+   行内文字信息足够定位，剧照留给播放） */
+.ep-row2 {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 11px 16px;
+  border-radius: 12px;
+  cursor: pointer;
+  text-align: left;
+  background: rgba(255, 255, 255, 0.035);
+  border: 1px solid var(--color-border-glass);
+  transition: border-color 0.15s, background 0.15s;
+}
+.ep-row2-num {
+  width: 44px;
+  flex-shrink: 0;
+  font-size: 15px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: var(--color-accent);
+  text-align: right;
+}
+.ep-row2-body {
+  min-width: 0;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.ep-row2-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--color-text-primary);
+  overflow: hidden;
+  white-space: nowrap;
+}
+.ep-row2-title > span:first-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ep-row2-vote {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  flex-shrink: 0;
+  font-size: 12px;
+  font-weight: 500;
+  color: rgba(250, 204, 21, 0.85);
+}
+.ep-row2-done-icon { flex-shrink: 0; color: #34d399; }
+.ep-row2-meta {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 12.5px;
+  color: var(--color-text-tertiary);
+  overflow: hidden;
+  white-space: nowrap;
+}
+.ep-row2-meta > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ep-row2-badge {
+  width: 34px;
+  height: 34px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  font-size: 11px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: var(--color-text-tertiary);
+  background: rgba(255, 255, 255, 0.06);
+}
+.ep-row2-badge.done {
+  color: #fff;
+  background: #34d399;
+}
+.ep-row2-badge.watching {
+  color: #03222e;
+  background: #00d4ff;
+}
+
+/* 已看/在看行信号 */
+.ep-row2.watched .ep-row2-title { color: #34d399; }
+.ep-row2.watching { border-color: rgba(0, 212, 255, 0.28); }
+
+/* 聚焦行/按钮抬升到相邻元素之上：后渲染的兄弟背景会盖住前一元素的辉光
+   （行间距 8px、操作键间距 10px 都小于辉光半径，同设置页 .nas-row 的处理） */
+.season-row2.gamepad-focus,
+.ep-row2.gamepad-focus,
+.detail2-btn.gamepad-focus {
+  position: relative;
+  z-index: 1;
+}
+
+/* ─── TMDB 候选选择 ────────────────────────── */
+.tmdb-option {
+  width: 100%;
+  display: flex;
+  align-items: stretch;
+  gap: 16px;
+  padding: 14px;
+  border-radius: 14px;
+  cursor: pointer;
+  text-align: left;
+  background: rgba(255, 255, 255, 0.035);
+  border: 1px solid var(--color-border-glass);
+  transition: border-color 0.2s, background 0.2s;
+}
+.tmdb-option:hover {
+  border-color: rgba(0, 212, 255, 0.4);
+  background: var(--color-bg-surface-hover);
+}
+.tmdb-option.current { border-color: rgba(0, 212, 255, 0.35); }
+
+.tmdb-option-poster {
+  width: 70px;
+  aspect-ratio: 2 / 3;
+  object-fit: cover;
+  border-radius: 8px;
+  flex-shrink: 0;
+  background: #0e1018;
+}
+
+.tmdb-option-poster-fallback {
+  background: linear-gradient(135deg, #2a1a4e 0%, #0d0d2b 100%);
+}
+
+.tmdb-option-pick {
+  align-self: center;
+  width: 36px;
+  height: 36px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  color: var(--color-text-tertiary);
+  border: 1px solid var(--color-border-glass);
+  transition: all 0.2s;
+}
+.tmdb-option:hover .tmdb-option-pick {
+  color: #000;
+  background: var(--color-accent);
+  border-color: var(--color-accent);
+}
+
+/* ─── 统计页（电视版：单列影视） ───────────── */
+.stats-page {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  padding: 20px 26px 22px;
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: 'tnum';
+}
+
+.stats-cols {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: repeat(var(--cols, 1), minmax(0, 1fr));
+  gap: 16px;
+}
+
+.stats-col {
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  padding: 18px 18px 16px;
+  border-radius: 16px;
+  border: 1px solid var(--color-border-glass);
+  border-top: 2px solid var(--cc);
+  background: var(--color-bg-surface);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+}
+
+.stats-col-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 5px;
+}
+.stats-col-head h2 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 18px;
+  font-weight: 700;
+  flex-shrink: 0;
+}
+.stats-col-head h2 svg { color: var(--cc); }
+.stats-col-total {
+  font-size: 22px;
+  font-weight: 800;
+  color: var(--cc);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.stats-col-sub {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  font-size: 14px;
+  color: var(--color-text-tertiary);
+  margin-bottom: 14px;
+}
+.stats-col-sub b { font-weight: 700; color: var(--color-text-secondary); }
+
+.stats-col-rows {
+  flex: 1 1 0;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding: 2px 18px 6px 0;
+  margin-right: -18px;
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in srgb, var(--cc) 45%, transparent) transparent;
+}
+.stats-col-rows::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--cc) 45%, transparent);
+  border-radius: 4px;
+}
+.stats-col-rows::-webkit-scrollbar-thumb:hover {
+  background: color-mix(in srgb, var(--cc) 80%, transparent);
+}
+
+.stats-row {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 8px 12px;
+  border-radius: 10px;
+  border: 1px solid transparent;
+  cursor: pointer;
+  transition: background 0.2s ease, border-color 0.2s ease;
+  animation: card-enter 0.3s cubic-bezier(0.2, 0, 0, 1) both;
+}
+
+.stats-row:hover,
+.stats-row-focus {
+  background: linear-gradient(to right, color-mix(in srgb, var(--cc) 10%, transparent), transparent 75%);
+  border-color: color-mix(in srgb, var(--cc) 35%, transparent);
+}
+.stats-row-focus {
+  outline: none;
+  box-shadow: inset 2px 0 0 var(--cc);
+}
+
+.stats-row-cover {
+  position: relative;
+  flex-shrink: 0;
+  border-radius: 8px;
+  overflow: hidden;
+  background: #0e1018;
+  border: 1px solid var(--color-border-glass);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.stats-row-cover-wide {
+  height: 80px;
+  width: auto;
+  min-width: 142px;
+}
+.stats-row-cover-wide .stats-row-img {
+  height: 100%;
+  width: auto;
+  object-fit: contain;
+}
+
+.stats-row-cover-portrait {
+  width: 54px;
+  height: 80px;
+}
+
+.stats-row-img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  display: block;
+}
+.stats-row-blank {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--color-text-tertiary);
+  background: linear-gradient(135deg, color-mix(in srgb, var(--cc) 18%, #12121e), #0d0d18);
+}
+
+.stats-row-rank {
+  position: absolute;
+  top: 5px; left: 5px;
+  z-index: 2;
+  min-width: 19px;
+  height: 19px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 5px;
+  font-size: 12px;
+  font-weight: 800;
+  line-height: 1;
+  color: #041018;
+  padding: 0 5px;
+}
+
+.stats-row-body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.stats-row-name {
+  font-size: 16px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.stats-row-sub {
+  font-size: 13px;
+  color: var(--color-text-tertiary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.stats-row-meta {
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+  min-width: 104px;
+}
+.stats-row-time {
+  font-size: 16px;
+  font-weight: 800;
+  white-space: nowrap;
+}
+.stats-row-count {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--color-text-tertiary);
+  white-space: nowrap;
+}
+
+.stats-col-empty {
+  padding: 40px 0;
+  text-align: center;
+  font-size: 15px;
+  color: var(--color-text-tertiary);
+  border: 1px dashed var(--color-border-glass);
+  border-radius: 12px;
+}
+
+/* ─── 空态 / 加载态 ─── */
+.empty-orb {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 96px; height: 96px;
+  border-radius: 50%;
+  color: var(--color-accent);
+  background: radial-gradient(circle, rgba(0, 212, 255, 0.16) 0%, transparent 70%);
+  border: 1px solid rgba(0, 212, 255, 0.25);
+  animation: float 3s ease-in-out infinite;
+}
+
+.stats-skeleton-pulse { animation: stats-pulse 1.4s ease-in-out infinite; }
+@keyframes stats-pulse {
+  0%, 100% { opacity: 0.35; }
+  50% { opacity: 0.85; }
+}
+
+/* ─── 添加影视弹窗：选择行 ─────────────────── */
+/* glass-card 风格的横向行：左侧图标右侧文字，圆角，hover/gamepad-focus 高亮 */
+.add-pick-row {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 16px 20px;
+  border-radius: 14px;
+  cursor: pointer;
+  background: var(--color-bg-surface);
+  border: 1px solid var(--color-border-glass);
+  transition: border-color 0.2s, background 0.2s, transform 0.2s cubic-bezier(0.22, 1, 0.36, 1);
+}
+.add-pick-row:hover {
+  border-color: rgba(0, 212, 255, 0.4);
+  background: var(--color-bg-surface-hover);
+  transform: translateX(3px);
+}
+.add-pick-row.gamepad-focus {
+  border-color: rgba(0, 212, 255, 0.7);
+  background: rgba(0, 212, 255, 0.06);
+}
+
+/* ─── 设置页（电视版） ─────────────────────── */
+/* 分区卡片：图标标题 + 内容。padding 收紧保证 1080p 单屏（右列四卡 + 标题区
+   总高约 950px，超出即被 overflow-hidden 裁掉——「关于」卡 flex-1 吸掉余量） */
+.set-section {
+  padding: 14px 20px;
+  border-radius: 16px;
+  background: var(--color-bg-surface);
+  border: 1px solid var(--color-border-glass);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  transition: border-color 0.2s, box-shadow 0.2s;
+}
+
+/* 焦点目标：设置项被聚焦时整区高亮（遥控器选中反馈） */
+.set-section.gamepad-focus-target {
+  border-color: rgba(0, 212, 255, 0.5);
+  box-shadow: 0 0 0 2px rgba(0, 212, 255, 0.2), 0 0 24px rgba(0, 212, 255, 0.18);
+}
+
+.set-section-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+/* NAS 服务器列表行 */
+.nas-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 16px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.035);
+  border: 1px solid var(--color-border-glass);
+  transition: border-color 0.2s, background 0.2s;
+}
+.nas-row:hover {
+  border-color: var(--color-border-glass-hover);
+  background: var(--color-bg-surface-hover);
+}
+
+/* NAS 操作按钮（编辑/删除） */
+.nas-action {
+  width: 42px;
+  height: 42px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 10px;
+  cursor: pointer;
+  color: var(--color-text-secondary);
+  background: var(--color-bg-surface);
+  border: 1px solid var(--color-border-glass);
+  transition: all 0.2s;
+}
+.nas-action:hover {
+  color: var(--color-accent);
+  border-color: var(--color-border-accent);
+  background: rgba(0, 212, 255, 0.12);
+}
+
+/* 整行删除键：本文件未分层，会压过 utilities 里的 w-full / text-red-400
+   （未分层样式在层叠里恒优先于 @layer），必须在这里显式覆盖 */
+.nas-action.w-full {
+  width: 100%;
+  color: var(--color-danger);
+}
+
+/* 聚焦行/按钮抬升到相邻卡片之上：后渲染的兄弟背景会盖住前一元素的辉光 */
+.nas-row.gamepad-focus,
+.nas-action.gamepad-focus {
+  position: relative;
+  z-index: 1;
+}
+
+[data-skip-animations] .stats-row { animation: none !important; }

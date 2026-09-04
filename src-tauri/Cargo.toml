@@ -1,7 +1,7 @@
 [package]
 name = "zex-tv"
 version = "0.1.0"
-description = "ZEX 影视库电视版"
+description = "ZEX 影视库电视版（海信 GX27 Android）"
 authors = ["ZEX Developer"]
 edition = "2021"
 
@@ -14,7 +14,33 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 tauri = { version = "2", features = [] }
+# ACTION_VIEW 拉起系统播放器——Windows 开发态用；Android 改走 JNI 调
+# PlayerLauncher.kt（纯 data 的 http 意图在电视上无 Activity 能接，必须挂 video/*）
+tauri-plugin-opener = "2"
+# 原生对话框（message/ask 确认框）
+tauri-plugin-dialog = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+rusqlite = { version = "0.32", features = ["bundled"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time"] }
+# Android 交叉编译必须避开 openssl → rustls
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+regex = "1"
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4", "serde"] }
 log = "0.4"
 env_logger = "0.11"
+thiserror = "2"
+once_cell = "1"
+parking_lot = "0.12"
+urlencoding = "2"
+percent-encoding = "2"
+# SMB2 客户端（纯 Rust，Android 交叉编译无痛）
+smb2 = "0.20"
+# 本地 HTTP 流媒体服务（给系统播放器喂流，Range 支持）
+tiny_http = "0.12"
+
+# Android：经 tauri with_webview→wry JniHandle 在主线程 JNI 调 PlayerLauncher.kt
+# （ndk_context 在 tauri v2 glue 里不初始化，android_context() 会 panic）
+[target.'cfg(target_os = "android")'.dependencies]
+jni = "0.21"

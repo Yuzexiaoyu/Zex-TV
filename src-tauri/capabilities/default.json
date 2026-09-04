@@ -3,5 +3,10 @@
   "identifier": "default",
   "description": "ZEX TV 默认能力",
   "windows": ["main"],
-  "permissions": ["core:default", "core:event:default"]
+  "permissions": [
+    "core:default",
+    "core:event:default",
+    "opener:default",
+    "dialog:default"
+  ]
 }
