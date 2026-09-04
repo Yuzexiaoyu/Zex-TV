@@ -72,7 +72,13 @@ function handleKey(e: KeyboardEvent) {
         (el as HTMLElement).blur();
         return;
       }
-      applyKey('keydown', e.key);
+      // OK：按下进长按判定（有 longPress 的组抬起才确认，见 focus.ts）；
+      // 系统对长按 OK 的 keydown 连发只认首按
+      if (e.key === 'Enter') {
+        if (!e.repeat) useFocusStore.getState().pressStart();
+      } else {
+        useFocusStore.getState().back();
+      }
       break;
     default:
       return; // 其它键不消费
@@ -80,6 +86,11 @@ function handleKey(e: KeyboardEvent) {
 }
 
 function handleKeyUp(e: KeyboardEvent) {
+  // OK 抬起：短按在此确认（长按判定见 focus.ts pressStart/pressEnd）
+  if (e.key === 'Enter') {
+    useFocusStore.getState().pressEnd();
+    return;
+  }
   if (e.key.startsWith('Arrow')) {
     const el = document.activeElement;
     if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) return;
@@ -97,8 +108,6 @@ function applyKey(type: string, key: string) {
       case 'ArrowDown': emitDir('down'); startRepeat('down'); break;
       case 'ArrowLeft': emitDir('left'); startRepeat('left'); break;
       case 'ArrowRight': emitDir('right'); startRepeat('right'); break;
-      case 'Enter': useFocusStore.getState().confirm(); break;
-      case 'Escape': useFocusStore.getState().back(); break;
     }
   } else if (type === 'keyup') {
     if (key.startsWith('Arrow')) stopRepeat();
@@ -113,6 +122,12 @@ export function startGamepad() {
   started = true;
   window.addEventListener('keydown', handleKey, { capture: true });
   window.addEventListener('keyup', handleKeyUp, { capture: true });
+  // 失焦/退后台（拉起系统播放器即 WebView onPause）时作废进行中的 OK 长按判定，
+  // 否则 keyup 丢失、定时器迟到的 longPress 会在播放器底下开操作表
+  window.addEventListener('blur', () => useFocusStore.getState().pressCancel());
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) useFocusStore.getState().pressCancel();
+  });
 }
 
 /** 兼容旧接口：电视版无开关，恒启用 */

@@ -149,6 +149,9 @@ const zh: Record<string, string> = {
   'series.noEpMovie': '该电影还没有关联视频文件',
   'series.noEpSeason': '该季没有剧集',
   'series.epNoFileThis': '该集还没有关联本地视频文件',
+  'series.epActionsTitle': '本集操作',
+  'series.seasonActionsTitle': '本季操作',
+  'series.hintEpsKeys': 'OK 播放 · 长按 OK 更多',
 
   // 统计
   'stats.video': '影视',
@@ -325,6 +328,9 @@ const en: Record<string, string> = {
   'series.noEpMovie': 'No video file linked to this movie yet',
   'series.noEpSeason': 'No episodes in this season',
   'series.epNoFileThis': 'This episode has no local video file yet',
+  'series.epActionsTitle': 'Episode actions',
+  'series.seasonActionsTitle': 'Season actions',
+  'series.hintEpsKeys': 'OK to play · hold OK for more',
 
   'stats.video': 'Series',
   'stats.unitVideo': 'series',

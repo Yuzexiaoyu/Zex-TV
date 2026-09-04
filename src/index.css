@@ -638,9 +638,11 @@ body {
   color: rgba(255, 255, 255, 0.55);
 }
 
-/* ─── 影院式详情页 v2（电视左右分栏） ─────────
-   结构：左栏固定（海报/信息/操作列），右栏季列表+集列表各自滚动。
-   性能约束：整页不滚动（只有列表内部滚）、行元素无入场动画、
+/* ─── 影院式详情页 v3（单纵列动线） ─────────
+   左栏：海报 + 总进度（纯展示，不可聚焦）。
+   右栏自上而下：标题区 → 操作行 → 季 chips → 集列表。
+   遥控器上下在四层之间穿行，左右只在行内移动。
+   性能约束：整页不滚动（只有集列表内部滚）、行元素无入场动画、
    transition 只挂焦点相关属性（电视 GPU 弱，all 会卡）。 */
 .detail2-root {
   position: relative;
@@ -672,27 +674,28 @@ body {
   background: linear-gradient(180deg, #0d0d2b 0%, rgba(13, 13, 43, 0.55) 45%, transparent 100%);
 }
 
-/* 左右分栏：左 40% 信息 + 右 60% 列表 */
+/* 左右分栏：左窄（海报+进度）+ 右宽（标题/操作/chips/集列表） */
 .detail2-grid {
   position: relative;
   z-index: 1;
   height: 100%;
   display: grid;
-  grid-template-columns: minmax(0, 40fr) minmax(0, 60fr);
-  gap: 26px;
-  padding: 26px 30px;
+  grid-template-columns: 240px minmax(0, 1fr);
+  gap: 30px;
+  padding: 26px 34px;
 }
 
-/* ── 左栏 ── */
+/* ── 左栏：海报 + 总进度（不可聚焦，遥控器焦点不进入） ── */
 .detail2-left {
   min-height: 0;
   display: flex;
   flex-direction: column;
-  gap: 18px;
+  gap: 16px;
+  padding-top: 8px;
 }
 .detail2-poster-wrap { flex-shrink: 0; }
 .detail2-poster {
-  width: 200px;
+  width: 100%;
   aspect-ratio: 2 / 3;
   object-fit: cover;
   border-radius: 14px;
@@ -706,54 +709,13 @@ body {
   justify-content: center;
   background: linear-gradient(135deg, #2a1a4e 0%, #0d0d2b 100%);
 }
-
-.detail2-info { min-height: 0; flex: 1; }
-.detail2-title {
-  font-size: 34px;
-  line-height: 1.15;
-  font-weight: 800;
-  letter-spacing: -0.02em;
-  color: #fff;
-  text-shadow: 0 4px 30px rgba(0, 0, 0, 0.5);
-}
-.detail2-aliases {
-  margin-top: 4px;
-  font-size: 15px;
-  color: rgba(255, 255, 255, 0.5);
-}
-.detail2-meta {
-  margin-top: 10px;
+.detail2-progress-block {
+  flex-shrink: 0;
   display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px 10px;
-  font-size: 14px;
-  color: rgba(255, 255, 255, 0.72);
-}
-.detail2-meta-item + .detail2-meta-item::before {
-  content: '·';
-  margin-right: 10px;
-  color: rgba(255, 255, 255, 0.3);
-}
-.detail2-overview {
-  margin-top: 12px;
-  max-height: 150px;
-  overflow-y: auto;
-  font-size: 14px;
-  line-height: 1.65;
-  color: rgba(255, 255, 255, 0.78);
-}
-.detail2-overview-empty { color: rgba(255, 255, 255, 0.45); }
-
-.detail2-progress {
-  margin-top: 14px;
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  max-width: 420px;
+  flex-direction: column;
+  gap: 8px;
 }
 .detail2-progress-bar {
-  flex: 1;
   height: 7px;
   border-radius: 100px;
   background: rgba(255, 255, 255, 0.14);
@@ -771,20 +733,77 @@ body {
   white-space: nowrap;
 }
 
-/* 左栏操作列：纵向四键（播放/收藏/元数据/删除） */
+/* ── 右栏 ── */
+.detail2-right {
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+/* 标题区 */
+.detail2-head { flex-shrink: 0; min-height: 0; }
+.detail2-title {
+  font-size: 36px;
+  line-height: 1.12;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  color: #fff;
+  text-shadow: 0 4px 30px rgba(0, 0, 0, 0.5);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.detail2-aliases {
+  margin-top: 2px;
+  font-size: 15px;
+  color: rgba(255, 255, 255, 0.5);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.detail2-meta {
+  margin-top: 8px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 10px;
+  font-size: 14px;
+  color: rgba(255, 255, 255, 0.72);
+}
+.detail2-meta-item + .detail2-meta-item::before {
+  content: '·';
+  margin-right: 10px;
+  color: rgba(255, 255, 255, 0.3);
+}
+/* 简介两行截断：完整文本留给鼠标（v2 的滚动简介会把操作行挤出屏） */
+.detail2-overview {
+  margin-top: 8px;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+  font-size: 14px;
+  line-height: 1.6;
+  color: rgba(255, 255, 255, 0.78);
+}
+.detail2-overview-empty { color: rgba(255, 255, 255, 0.45); }
+
+/* 操作行：横排四键（播放主键 + 收藏/元数据/删除）。
+   v2 纵向四键：Down 连按一路落到「删除」且 OK 即删，误触风险高；
+   横排后 Down 只进入内容区，删除只能刻意「右」到行尾 */
 .detail2-actions {
   flex-shrink: 0;
   display: flex;
-  flex-direction: column;
-  gap: 10px;
-  max-width: 340px;
+  gap: 12px;
 }
 .detail2-btn {
-  display: flex;
+  display: inline-flex;
   align-items: center;
-  gap: 10px;
-  padding: 13px 18px;
-  border-radius: 12px;
+  justify-content: center;
+  gap: 9px;
+  padding: 12px 20px;
+  border-radius: 13px;
   font-size: 16px;
   font-weight: 600;
   cursor: pointer;
@@ -795,6 +814,7 @@ body {
   transition: border-color 0.15s, background 0.15s, box-shadow 0.15s;
 }
 .detail2-btn.primary {
+  padding: 12px 28px;
   background: var(--color-accent);
   color: #000;
   border-color: transparent;
@@ -811,26 +831,50 @@ body {
   background: rgba(255, 215, 94, 0.1);
 }
 .detail2-btn-sub {
-  margin-left: auto;
+  margin-left: 4px;
   font-size: 13px;
   opacity: 0.75;
   font-weight: 500;
 }
 
-/* ── 右栏：季面板 + 集面板 ── */
-.detail2-right {
-  min-height: 0;
+/* 季 chips：单行横向滚动，焦点即预览（焦点到哪片，集列表实时切到哪季） */
+.detail2-chips { flex-shrink: 0; }
+.detail2-chips-scroll {
   display: flex;
-  flex-direction: column;
-  gap: 18px;
+  gap: 8px;
+  overflow-x: auto;
+  padding: 6px;
+  scroll-padding: 6px;
 }
-.detail2-seasons {
+.season-chip {
   flex-shrink: 0;
-  max-height: 34%;
-  display: flex;
-  flex-direction: column;
-  min-height: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 16px;
+  border-radius: 100px;
+  cursor: pointer;
+  background: rgba(255, 255, 255, 0.035);
+  border: 1px solid var(--color-border-glass);
+  transition: border-color 0.15s, background 0.15s;
 }
+.season-chip.active {
+  background: rgba(0, 212, 255, 0.1);
+  border-color: rgba(0, 212, 255, 0.45);
+}
+.season-chip-name {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--color-text-primary);
+  white-space: nowrap;
+}
+.season-chip-count {
+  font-size: 12px;
+  color: var(--color-text-tertiary);
+}
+.season-chip-count.done { color: #34d399; }
+
+/* 集面板 */
 .detail2-eps {
   flex: 1;
   min-height: 0;
@@ -849,9 +893,16 @@ body {
   font-size: 18px;
   font-weight: 700;
   color: var(--color-text-primary);
+  white-space: nowrap;
+}
+/* 按键提示（OK 播放 / 长按 OK 更多）：长按是隐藏交互，给常驻可发现性 */
+.detail2-hint {
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--color-text-tertiary);
+  white-space: nowrap;
 }
 .detail2-panel-tools {
-  margin-left: auto;
   display: flex;
   gap: 8px;
 }
@@ -874,18 +925,8 @@ body {
   border-color: var(--color-border-glass-hover);
 }
 
-/* 两个滚动列表：四周留 6px + scroll-padding，否则 .gamepad-focus 的
+/* 集列表滚动口：四周留 6px + scroll-padding，否则 .gamepad-focus 的
    outline/辉光会被滚动口边缘硬切、scrollIntoView 后贴边更明显（同设置页 NAS 列表） */
-.detail2-seasons-scroll {
-  flex: 1;
-  min-height: 0;
-  overflow-y: auto;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  padding: 6px;
-  scroll-padding: 6px;
-}
 .detail2-eps-scroll {
   flex: 1;
   min-height: 0;
@@ -905,78 +946,6 @@ body {
   gap: 10px;
   color: var(--color-text-secondary);
   font-size: 15px;
-}
-
-/* 季行：序号 + 名称 + 看/共 + 迷你进度条 */
-.season-row2 {
-  width: 100%;
-  display: flex;
-  align-items: center;
-  gap: 14px;
-  padding: 11px 16px;
-  border-radius: 12px;
-  cursor: pointer;
-  text-align: left;
-  background: rgba(255, 255, 255, 0.035);
-  border: 1px solid var(--color-border-glass);
-  transition: border-color 0.15s, background 0.15s;
-}
-.season-row2.active {
-  background: rgba(0, 212, 255, 0.1);
-  border-color: rgba(0, 212, 255, 0.45);
-}
-.season-row2-num {
-  width: 30px;
-  height: 30px;
-  flex-shrink: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: 9px;
-  font-size: 14px;
-  font-weight: 700;
-  font-variant-numeric: tabular-nums;
-  color: var(--color-text-secondary);
-  background: rgba(255, 255, 255, 0.06);
-}
-.season-row2.active .season-row2-num {
-  color: var(--color-accent);
-  background: rgba(0, 212, 255, 0.14);
-}
-.season-row2-body {
-  min-width: 0;
-  flex: 1;
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 10px;
-}
-.season-row2-name {
-  font-size: 15px;
-  font-weight: 600;
-  color: var(--color-text-primary);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.season-row2-name.done { color: #34d399; }
-.season-row2-count {
-  font-size: 13px;
-  color: var(--color-text-tertiary);
-}
-.season-row2-bar {
-  width: 64px;
-  height: 4px;
-  flex-shrink: 0;
-  border-radius: 100px;
-  background: rgba(255, 255, 255, 0.1);
-  overflow: hidden;
-}
-.season-row2-bar-fill {
-  display: block;
-  height: 100%;
-  border-radius: 100px;
-  background: #34d399;
 }
 
 /* 集行：序号 + 标题/元信息 + 状态徽标（无剧照——
@@ -1076,12 +1045,35 @@ body {
 .ep-row2.watching { border-color: rgba(0, 212, 255, 0.28); }
 
 /* 聚焦行/按钮抬升到相邻元素之上：后渲染的兄弟背景会盖住前一元素的辉光
-   （行间距 8px、操作键间距 10px 都小于辉光半径，同设置页 .nas-row 的处理） */
-.season-row2.gamepad-focus,
+   （行间距 8px、chips 间距 8px、操作键间距 12px 都小于辉光半径，同 .nas-row 的处理） */
+.season-chip.gamepad-focus,
 .ep-row2.gamepad-focus,
 .detail2-btn.gamepad-focus {
   position: relative;
   z-index: 1;
+}
+
+/* ─── 操作表（ActionSheet：长按 OK / 删除确认共用） ── */
+.action-sheet-item {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 13px 18px;
+  border-radius: 12px;
+  font-size: 16px;
+  font-weight: 600;
+  cursor: pointer;
+  text-align: left;
+  color: var(--color-text-primary);
+  background: rgba(255, 255, 255, 0.035);
+  border: 1px solid var(--color-border-glass);
+  transition: border-color 0.15s, background 0.15s;
+}
+.action-sheet-item.danger {
+  color: #ef4444;
+  border-color: rgba(239, 68, 68, 0.35);
+  background: rgba(239, 68, 68, 0.1);
 }
 
 /* ─── TMDB 候选选择 ────────────────────────── */

@@ -16,6 +16,10 @@ export interface GroupOpts {
   cols?: number;
   /** OK 键按下时激活第 index 项 */
   activate: (index: number) => void;
+  /** 长按 OK（≥550ms）触发。定义了 longPress 的组 OK 改为「抬起确认」：
+   *  否则长按标记的瞬间就会先触发 activate（如集行长按标记时误拉起播放器）。
+   *  没定义 longPress 的组保持按下即确认（最跟手） */
+  longPress?: (index: number) => void;
   /** 焦点移到 index 时保证其可见（如滚动容器 scrollToIndex） */
   scrollIntoView?: (index: number) => void;
   /** 焦点在边界且继续朝 dir 移动时跳转（跨区域）；不定义则停在边界 */
@@ -47,6 +51,13 @@ interface FocusStore {
   switchTo: (group: string, index?: number) => void;
   move: (dir: Dir) => void;
   confirm: () => void;
+  /** OK keydown。栈顶组有 longPress → 进入长按判定（抬起确认/长按触发二选一）；
+   *  没有 → 立即 activate（原 confirm 语义，按下即响应） */
+  pressStart: () => void;
+  /** OK keyup。长按判定中的短按在这里 activate */
+  pressEnd: () => void;
+  /** 作废进行中的长按判定（焦点移走/窗口失焦/退后台）。本次按键不再触发任何动作 */
+  pressCancel: () => void;
   /** 弹栈；返回 true = 发生了弹栈 */
   back: () => boolean;
 }
@@ -79,6 +90,22 @@ function topItem(stack: FocusItem[]): FocusItem | undefined {
   return stack.length ? stack[stack.length - 1] : undefined;
 }
 
+// ─── OK 长按判定 ──────────────────────────────
+// pressStart：有 longPress 的组记为「待判定」并起 550ms 定时器；没有则立即 activate。
+// 定时器先到 → longPress，本次按键到此为止（keyup 不再 activate）；
+// keyup 先到 → 短按 activate。焦点切换/失焦/退后台 → 判定作废（keyup 也不再
+// activate，否则移动后松手会在新位置误触发）。
+const OK_HOLD_MS = 550;
+let okTimer: number | null = null;
+let okPending = false;
+let okGroup = '';
+let okIndex = -1;
+
+function cancelOkPress() {
+  if (okTimer !== null) { window.clearTimeout(okTimer); okTimer = null; }
+  okPending = false;
+}
+
 export const useFocusStore = create<FocusStore>((set, get) => ({
   stack: [],
 
@@ -87,6 +114,7 @@ export const useFocusStore = create<FocusStore>((set, get) => ({
 
   reset: (group, index = null) => {
     stopGamepadRepeat();
+    cancelOkPress();
     blurIfTyping();
     set({ stack: [{ group, index }] });
     if (index != null) optsOf(group)?.scrollIntoView?.(index);
@@ -95,6 +123,7 @@ export const useFocusStore = create<FocusStore>((set, get) => ({
   push: (group, index = 0) => {
     const top = topItem(get().stack);
     if (top?.group === group && top.index === index) return;
+    cancelOkPress();
     blurIfTyping();
     set((s) => ({ stack: [...s.stack, { group, index }] }));
     optsOf(group)?.scrollIntoView?.(index);
@@ -102,6 +131,7 @@ export const useFocusStore = create<FocusStore>((set, get) => ({
 
   switchTo: (group, index = 0) => {
     stopGamepadRepeat();
+    cancelOkPress();
     blurIfTyping();
     // 目标组不存在（视图组件挂载的注册 effect 还没跑——按键快过渲染提交）时，
     // 不能把栈切到死组：之后所有按键 registry.get 都拿不到，焦点全哑且无高亮。
@@ -147,10 +177,10 @@ export const useFocusStore = create<FocusStore>((set, get) => ({
     if (dir === 'left' || dir === 'right') {
       if (opts.horizontal?.(dir, index)) return;
     }
-    // 只有设置页和详情页的垂直区域将左右定义为跨区域切换；
-    // 顶部 nav 仍是横向列表，左右必须由通用网格逻辑处理。
-    const verticalArea = top.group === 'settings:nas' || top.group === 'settings:right'
-      || top.group === 'detail-hero' || top.group === 'detail-seasons' || top.group === 'detail-episodes';
+    // 只有设置页的纵向区域将左右定义为跨区域切换（如 NAS 列表左键回菜单列）；
+    // 顶部 nav 与详情页 v3 的三个组（操作行/季 chips）都是横向行，左右必须交给
+    // 通用网格逻辑。集列表 cols=1，左右不匹配任何 case → 原地停住（v3 设计如此）。
+    const verticalArea = top.group === 'settings:nas' || top.group === 'settings:right';
     if (verticalArea && (dir === 'left' || dir === 'right')) {
       opts.leave?.(dir, index);
       return;
@@ -188,6 +218,8 @@ export const useFocusStore = create<FocusStore>((set, get) => ({
     }
     if (crossed) { opts.leave?.(dir, index); return; }
     if (next !== index) {
+      // 焦点移动时作废进行中的 OK 长按判定（否则移动后定时器在越界的 index 上触发）
+      cancelOkPress();
       set((s) => {
         const stack = s.stack.slice();
         stack[stack.length - 1] = { ...stack[stack.length - 1], index: next };
@@ -206,9 +238,44 @@ export const useFocusStore = create<FocusStore>((set, get) => ({
     optsOf(top.group)?.activate?.(top.index);
   },
 
+  pressStart: () => {
+    cancelOkPress();
+    const top = topItem(get().stack);
+    if (!top || top.index == null) {
+      console.warn('[focus] pressStart: 空栈或待命态，OK 丢弃', JSON.stringify(top));
+      return;
+    }
+    const opts = optsOf(top.group);
+    if (!opts) {
+      console.warn('[focus] pressStart: 栈顶组未注册', top.group);
+      return;
+    }
+    if (!opts.longPress) { opts.activate?.(top.index); return; }
+    okPending = true;
+    okGroup = top.group;
+    okIndex = top.index;
+    okTimer = window.setTimeout(() => {
+      okTimer = null;
+      if (!okPending) return;
+      okPending = false;
+      optsOf(okGroup)?.longPress?.(okIndex);
+    }, OK_HOLD_MS);
+  },
+
+  pressEnd: () => {
+    if (!okPending) return; // 无判定（立即确认的组首按已激活 / 长按已触发 / 已作废）
+    cancelOkPress();
+    const top = topItem(get().stack);
+    if (!top || top.index == null) return;
+    optsOf(top.group)?.activate?.(top.index);
+  },
+
+  pressCancel: () => { cancelOkPress(); },
+
   back: () => {
     const stack = get().stack;
     if (stack.length <= 1) return false;
+    cancelOkPress();
     const popped = stack[stack.length - 1];
     const rest = stack.slice(0, -1);
     set({ stack: rest });

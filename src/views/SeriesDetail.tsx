@@ -1,33 +1,35 @@
-// 影视详情页（电视版，v2 重构）。
+// 影视详情页（电视版，v3 重构）。
 //
-// 结构：左右分栏（TV 标准），不再上下滚长页——
-//   左栏（固定不动）  海报 + 标题/元信息/简介/进度 + 操作按钮（播放/收藏/元数据/删除）
-//   右栏（内部滚动）  季列表（纵列，OK 进集列表） + 当前季的集列表
-// 焦点纵向流动：左栏组 →「右」进右栏；季列表 ↔ 集列表上下两段（顶/末行越界互通）。
-// 焦点横向换季：集列表里按左右 = 切季（原交互保留）。
-// 返回 = 遥控器 Back（焦点栈弹层）。
+// 动线（v2 三个纵向列表互相横跳 → v3 单纵列高速路）：
+//   右栏自上而下三条横排：操作行（播放/收藏/元数据/删除）→ 季 chips → 集列表。
+//   下/上 = 在三条排之间移动；左/右 = 只在排内移动，行首/行尾停住。
+//   每个键的行为唯一可预期，v2 的「集列表左右=换季」隐形跳转废除。
 //
-// 性能（旧版卡顿的根因，全部针对修）：
-//   - 整页不再滚动，只有右栏列表滚 → scroll-behavior:smooth 不再拖着整页跑
-//   - 集行不再有 fade-up 入场动画（430 行动画同时排队 = 进页面即卡）
-//   - transition 只挂焦点相关的具体属性，不用 all
-//   - 标记一集只 setState 局部（patchEpisode 保持，但列表渲染经 React.memo
-//     的行组件，未变的行不再 diff
-//   - 一次只渲染一个季的集（旧版也是，保持），且季标签从 22 个横向 chip
-//     改为纵向列表，不再换行堆叠
+//   - 季 chips 焦点即预览：焦点移到哪个 chip，集列表实时切到该季
+//     （与影视库「焦点落在哪张海报 Hero 就显示哪部」同一套语言）。
+//   - OK/下 从 chips 进集列表，落到该季第一个未看集（全看完落第 0 集）。
+//   - 长按 OK：集行 → 单集操作表（播放/标记已看未看）；季 chip → 整季操作表
+//     （整季标已看/重置）。v2 的头部小按钮遥控器聚焦不到，只能鼠标点。
+//   - 删除影视走确认弹窗，默认焦点在「取消」（v2 里 OK 落在删除键 = 立即删除）。
+//   - 电影不渲染季 chips：操作行「下」直达文件行，文件行「上」回操作行。
+//   - 返回 = 遥控器 Back（焦点栈弹层 → onClose）。
+//
+// 性能（沿用 v2 结论）：整页不滚动、只有集列表内部滚；行组件 React.memo；
+// 一次只渲染一季；transition 只挂焦点相关属性（电视 GPU 弱，all 会卡）。
 
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import { message } from '@tauri-apps/plugin-dialog';
 import {
   Play, Star, Check, CheckCheck, RotateCcw, Loader2,
-  Film, Sparkles, Trash2,
+  Film, Sparkles, Trash2, X,
 } from 'lucide-react';
 import { clsx } from 'clsx';
 import * as api from '../api';
 import type { Episode, Season, SeriesCard, SeriesDetailData } from '../types';
 import { cleanEpisodeTitle, coverSrc, formatDuration, formatRuntime, watchPercent, yearOf } from '../utils/media';
 import { useFocusStore, useGamepadGroup, useFocusIndex } from '../gamepad';
+import ActionSheet from '../components/ActionSheet';
 import { useT } from '../i18n';
 
 interface Props {
@@ -38,9 +40,15 @@ interface Props {
   onDelete?: (s: SeriesCard) => void;
 }
 
-const DETAIL_GROUPS = ['detail-hero', 'detail-seasons', 'detail-episodes'] as const;
+const DETAIL_GROUPS = ['detail-actions', 'detail-seasons', 'detail-episodes'] as const;
 
-/** 集行。memo：焦点移动/标记一集时，其它行不重渲染（旧版每次全列表 diff，卡顿主因之一） */
+/** 进集列表的落点：该季第一个未看集（都看完了落第 0 集） */
+function entryIndex(eps: Episode[]): number {
+  const i = eps.findIndex((e) => !e.watched);
+  return i >= 0 ? i : 0;
+}
+
+/** 集行。memo：焦点移动/标记一集时，其它行不重渲染 */
 const EpRow = memo(function EpRow({ ep, index, isMovie, seriesTitle, focused, onPlay }: {
   ep: Episode;
   index: number;
@@ -88,36 +96,29 @@ const EpRow = memo(function EpRow({ ep, index, isMovie, seriesTitle, focused, on
   );
 });
 
-/** 季行 */
-const SeasonRow = memo(function SeasonRow({ season, active, focused, onPick }: {
+/** 季 chip（横向） */
+const SeasonChip = memo(function SeasonChip({ season, index, active, focused, onPick }: {
   season: Season & { episodes: Episode[] };
+  index: number;
   active: boolean;
   focused: boolean;
   onPick: (id: string) => void;
 }) {
   const t = useT();
   const watched = season.episodes.filter((e) => e.watched).length;
-  const done = season.episodes.length > 0 && watched === season.episodes.length;
+  const total = season.episodes.length;
+  const done = total > 0 && watched === total;
   return (
     <button
-      data-season-row={season.id}
+      data-season-chip={index}
       onClick={() => onPick(season.id)}
-      className={clsx('season-row2', active && 'active', focused && 'gamepad-focus')}
+      className={clsx('season-chip', active && 'active', focused && 'gamepad-focus')}
     >
-      <span className="season-row2-num">{season.season_number}</span>
-      <span className="season-row2-body">
-        <span className={clsx('season-row2-name', done && 'done')}>
-          {season.name?.trim() || t('series.seasonN', { n: season.season_number })}
-        </span>
-        <span className="season-row2-count tabular-nums">
-          {watched}/{season.episodes.length}
-        </span>
+      <span className="season-chip-name">
+        {season.name?.trim() || t('series.seasonN', { n: season.season_number })}
       </span>
-      <span className="season-row2-bar">
-        <span
-          className="season-row2-bar-fill"
-          style={{ width: `${season.episodes.length > 0 ? (watched / season.episodes.length) * 100 : 0}%` }}
-        />
+      <span className={clsx('season-chip-count tabular-nums', done && 'done')}>
+        {watched}/{total}
       </span>
     </button>
   );
@@ -129,6 +130,11 @@ export default function SeriesDetail({ seriesId, onClose, onChanged, onAutoFetch
   const [loading, setLoading] = useState(true);
   const [activeSeason, setActiveSeason] = useState('');
   const epListRef = useRef<HTMLDivElement>(null);
+
+  // 长按 OK 弹出的操作表（集/季）与删除确认
+  const [epSheet, setEpSheet] = useState<Episode | null>(null);
+  const [seasonSheet, setSeasonSheet] = useState<(Season & { episodes: Episode[] }) | null>(null);
+  const [confirmDelete, setConfirmDelete] = useState(false);
 
   const load = useCallback(async (keepSeason = true) => {
     const detail = await api.getSeriesDetail(seriesId);
@@ -174,79 +180,81 @@ export default function SeriesDetail({ seriesId, onClose, onChanged, onAutoFetch
   const nextEp = data?.next_episode;
   const seasons = data?.seasons ?? [];
   const episodes = season?.episodes ?? [];
+  // 季 chips 是否渲染（电影/无季的剧集不渲染：操作行「下」直达集列表）
+  const chipsVisible = !!data && !isMovie && seasons.length > 0;
+  const curSeasonIdx = Math.max(0, seasons.findIndex((s) => s.id === season?.id));
 
   // ─── 焦点组 ───────────────────────────────
-  const heroFocused = useFocusIndex('detail-hero');
+  const actionsFocused = useFocusIndex('detail-actions');
   const seasonsFocused = useFocusIndex('detail-seasons');
   const episodesFocused = useFocusIndex('detail-episodes');
-  const [lastHeroRow, setLastHeroRow] = useState(0);
-  const [lastSeasonRow, setLastSeasonRow] = useState(0);
-  const [lastEpisodeRow, setLastEpisodeRow] = useState(0);
+  const [lastActionIdx, setLastActionIdx] = useState(0);
 
-  useEffect(() => { if (heroFocused >= 0) setLastHeroRow(heroFocused); }, [heroFocused]);
-  useEffect(() => { if (seasonsFocused >= 0) setLastSeasonRow(seasonsFocused); }, [seasonsFocused]);
-  useEffect(() => { if (episodesFocused >= 0) setLastEpisodeRow(episodesFocused); }, [episodesFocused]);
+  useEffect(() => { if (actionsFocused >= 0) setLastActionIdx(actionsFocused); }, [actionsFocused]);
 
-  // 左栏：[播放/继续, 收藏, 元数据, 删除] 一列
-  const heroCount = 4;
-  useGamepadGroup('detail-hero', {
-    count: heroCount,
-    cols: 1,
+  // 季 chips 焦点即预览：焦点移到哪个 chip，下方集列表实时切到该季
+  useEffect(() => {
+    if (seasonsFocused >= 0 && seasons[seasonsFocused]) {
+      setActiveSeason(seasons[seasonsFocused].id);
+    }
+  }, [seasonsFocused, seasons]);
+
+  const enterEpisodes = useCallback(() => {
+    if (episodes.length === 0) return; // 空季不进入（死组）
+    useFocusStore.getState().switchTo('detail-episodes', entryIndex(episodes));
+  }, [episodes]);
+
+  const playNextOrMovie = useCallback(() => {
+    if (!data) return;
+    if (nextEp) {
+      const target = data.seasons.flatMap((s) => s.episodes).find((e) => e.id === nextEp.id);
+      if (target) void playEpisode(target);
+      return;
+    }
+    const movieFile = isMovie ? data.seasons[0]?.episodes[0] : undefined;
+    if (movieFile) void playEpisode(movieFile);
+  }, [data, nextEp, isMovie]);
+
+  // 操作行（横向）：播放 → 收藏 → 元数据 → 删除。删除走确认弹窗
+  useGamepadGroup('detail-actions', {
+    count: 4,
+    cols: 4,
     activate: (i) => {
       if (!data) return;
-      if (i === 0) {
-        if (nextEp) {
-          const target = data.seasons.flatMap((s) => s.episodes).find((e) => e.id === nextEp.id);
-          if (target) void playEpisode(target);
-          return;
-        }
-        const movieFile = isMovie ? data.seasons[0]?.episodes[0] : undefined;
-        if (movieFile) void playEpisode(movieFile);
-        return;
-      }
+      if (i === 0) { playNextOrMovie(); return; }
       if (i === 1) { void toggleFavorite(); return; }
-      const card: SeriesCard = toCard(data);
-      if (i === 2) onAutoFetch?.(card);
-      else onDelete?.(card);
+      if (i === 2) { onAutoFetch?.(toCard(data)); return; }
+      setConfirmDelete(true);
     },
     leave: (dir) => {
-      // 上键只停在左侧操作区顶部，返回详情使用 Back/Escape。
-      // 「右」进右栏：剧集 → 季列表；电影不渲染季面板 → 直达文件行
-      if (dir === 'right') {
-        if (!isMovie && seasons.length > 0) {
-          useFocusStore.getState().switchTo('detail-seasons', Math.min(lastSeasonRow, seasons.length - 1));
-        } else if (episodes.length > 0) {
-          useFocusStore.getState().switchTo('detail-episodes', Math.min(lastEpisodeRow, episodes.length - 1));
-        }
-      }
+      if (dir !== 'down') return; // 上=页面顶部（Back 退出）；左右行首行尾停住
+      if (chipsVisible) useFocusStore.getState().switchTo('detail-seasons', curSeasonIdx);
+      else enterEpisodes();
     },
     exit: onClose,
   });
 
-  // 季列表（纵向）。OK 只选择当前季；右键进入集列表，左键回左栏
+  // 季 chips（横向）。焦点即预览（移动=切季）；OK/下 进集列表；长按 OK 整季操作
   useGamepadGroup('detail-seasons', {
-    count: seasons.length,
-    cols: 1,
-    activate: (i) => {
-      const s = seasons[i];
-      if (!s) return;
-      if (s.id !== activeSeason) {
-        setActiveSeason(s.id);
-        useFocusStore.getState().switchTo('detail-episodes', 0);
-      }
-    },
+    count: chipsVisible ? seasons.length : 0,
+    cols: chipsVisible ? seasons.length : 1,
+    activate: () => enterEpisodes(),
     scrollIntoView: (i) => {
-      document.querySelector(`[data-season-idx="${i}"]`)?.scrollIntoView({ block: 'nearest' });
+      document.querySelector(`[data-season-chip="${i}"]`)
+        ?.scrollIntoView({ inline: 'nearest', block: 'nearest' });
     },
     leave: (dir) => {
-      if (dir === 'left') useFocusStore.getState().switchTo('detail-hero', lastHeroRow);
-      else if (dir === 'right' && episodes.length > 0) useFocusStore.getState().switchTo('detail-episodes', Math.min(lastEpisodeRow, episodes.length - 1));
-      else if (dir === 'down' && episodes.length > 0) useFocusStore.getState().switchTo('detail-episodes', Math.min(lastEpisodeRow, episodes.length - 1));
+      if (dir === 'up') useFocusStore.getState().switchTo('detail-actions', lastActionIdx);
+      else if (dir === 'down') enterEpisodes();
+    },
+    longPress: (i) => {
+      const s = seasons[i];
+      if (s && s.episodes.length > 0) setSeasonSheet(s);
     },
     exit: onClose,
   });
 
-  // 集列表（纵向，OK = 播放）。左右 = 切季（文件头声明的原交互）；上到头回季列表。
+  // 集列表（纵向，OK = 播放，长按 OK = 单集操作）。上到头回季 chips（电影回操作行）
   useGamepadGroup('detail-episodes', {
     count: episodes.length,
     cols: 1,
@@ -256,37 +264,20 @@ export default function SeriesDetail({ seriesId, onClose, onChanged, onAutoFetch
       (rows?.[i] as HTMLElement | undefined)?.scrollIntoView({ block: 'nearest' });
     },
     leave: (dir) => {
-      // 用解析后的当前季定位（activeSeason 无效时 memo 回退 seasons[0]）
-      const curIdx = seasons.findIndex((s) => s.id === season?.id);
-      if (dir === 'left') {
-        // 上一季；第一季回季列表。电影不渲染季面板（后端仍建了 1 季），
-        // seasons.length>0 会把焦点送进不可见组——电影直接回左栏
-        if (curIdx > 0) {
-          setActiveSeason(seasons[curIdx - 1].id);
-          useFocusStore.getState().switchTo('detail-episodes', 0);
-        } else if (!isMovie && seasons.length > 0) {
-          useFocusStore.getState().switchTo('detail-seasons', Math.min(lastSeasonRow, seasons.length - 1));
-        } else {
-          useFocusStore.getState().switchTo('detail-hero', lastHeroRow);
-        }
-      } else if (dir === 'right') {
-        // 下一季；最后一季停在原地
-        if (curIdx >= 0 && curIdx < seasons.length - 1) {
-          setActiveSeason(seasons[curIdx + 1].id);
-          useFocusStore.getState().switchTo('detail-episodes', 0);
-        }
-      } else if (dir === 'up') {
-        // 集列表顶行按上 → 季列表；电影没有季面板 → 回左栏（导航闭环）
-        if (!isMovie && seasons.length > 0) useFocusStore.getState().switchTo('detail-seasons', Math.min(lastSeasonRow, seasons.length - 1));
-        else useFocusStore.getState().switchTo('detail-hero', lastHeroRow);
-      }
+      if (dir !== 'up') return; // 左右在纵列原地停住；下到底停住
+      if (chipsVisible) useFocusStore.getState().switchTo('detail-seasons', curSeasonIdx);
+      else useFocusStore.getState().switchTo('detail-actions', lastActionIdx);
+    },
+    longPress: (i) => {
+      const ep = episodes[i];
+      if (ep) setEpSheet(ep);
     },
     exit: onClose,
   });
 
-  // 打开详情 → 焦点先落在左栏播放键（最常用的动作）
+  // 打开详情 → 焦点先落在操作行的播放键（最常用的动作）
   useEffect(() => {
-    useFocusStore.getState().push('detail-hero', 0);
+    useFocusStore.getState().push('detail-actions', 0);
     return () => {
       const s = useFocusStore.getState();
       const top = s.stack.length ? s.stack[s.stack.length - 1] : undefined;
@@ -294,16 +285,18 @@ export default function SeriesDetail({ seriesId, onClose, onChanged, onAutoFetch
     };
   }, []);
 
-  // 切季后集数变少时，栈里的焦点索引可能指向不存在的集（第 24 集的季 → 第 6 集的季，
-  // 焦点停在 23：整屏无高亮）。集数变化时把越界焦点收到最后一集
+  // 切季/重刮后列表变短时，栈里的焦点索引可能越界（第 24 集的季 → 第 6 集的季，
+  // 焦点停在 23：整屏无高亮）。把越界焦点收到最后一项
   useEffect(() => {
     const s = useFocusStore.getState();
     const top = s.stack[s.stack.length - 1];
-    if (top?.group !== 'detail-episodes') return;
-    if (top.index != null && top.index >= episodes.length) {
+    if (top?.group === 'detail-episodes' && top.index != null && top.index >= episodes.length) {
       s.switchTo('detail-episodes', Math.max(0, episodes.length - 1));
     }
-  }, [episodes.length]);
+    if (top?.group === 'detail-seasons' && top.index != null && top.index >= seasons.length) {
+      s.switchTo('detail-seasons', Math.max(0, seasons.length - 1));
+    }
+  }, [episodes.length, seasons.length]);
 
   const playEpisode = async (ep: Episode) => {
     if (!ep.local_path) {
@@ -318,10 +311,19 @@ export default function SeriesDetail({ seriesId, onClose, onChanged, onAutoFetch
     }
   };
 
-  const setSeasonWatched = async (watched: boolean) => {
-    if (!season) return;
+  const markEpisode = async (ep: Episode, watched: boolean) => {
     try {
-      await api.markSeasonWatched(season.id, watched);
+      await api.markEpisodeWatched(ep.id, watched);
+      await load();
+      onChanged?.();
+    } catch (err) {
+      void message(t('series.markFailed', { msg: String(err) }), { title: t('common.error'), kind: 'error' });
+    }
+  };
+
+  const setSeasonWatchedById = async (seasonId: string, watched: boolean) => {
+    try {
+      await api.markSeasonWatched(seasonId, watched);
       await load();
       onChanged?.();
     } catch (err) {
@@ -373,6 +375,10 @@ export default function SeriesDetail({ seriesId, onClose, onChanged, onAutoFetch
     ? `S${String(nextEp.season_number).padStart(2, '0')}E${String(nextEp.episode_number).padStart(2, '0')}`
     : '';
 
+  const epSheetSe = epSheet
+    ? `S${String(seasons.find((s) => s.id === epSheet.season_id)?.season_number ?? 1).padStart(2, '0')}E${String(epSheet.episode_number).padStart(2, '0')}`
+    : '';
+
   return (
     <div className="detail2-root">
       {/* 背景图：fixed 覆盖整块画布（画布方案下 fixed 相对 #root），单张、无动画重复 */}
@@ -386,7 +392,7 @@ export default function SeriesDetail({ seriesId, onClose, onChanged, onAutoFetch
       )}
 
       <div className="detail2-grid">
-        {/* ─── 左栏：信息 + 操作（不滚动） ─── */}
+        {/* ─── 左栏：海报 + 总进度（纯展示，不聚焦） ─── */}
         <div className="detail2-left">
           <div className="detail2-poster-wrap">
             {data.poster_path ? (
@@ -398,12 +404,25 @@ export default function SeriesDetail({ seriesId, onClose, onChanged, onAutoFetch
             )}
           </div>
 
-          <div className="detail2-info">
+          {!isMovie && data.episode_count > 0 && (
+            <div className="detail2-progress-block">
+              <div className="detail2-progress-bar">
+                <div className="detail2-progress-fill" style={{ width: `${progressPct}%` }} />
+              </div>
+              <span className="detail2-progress-text tabular-nums">
+                {t('series.watchedCount', { watched: data.watched_count, total: data.episode_count })}
+              </span>
+            </div>
+          )}
+        </div>
+
+        {/* ─── 右栏：标题区 → 操作行 → 季 chips → 集列表（单纵列动线） ─── */}
+        <div className="detail2-right">
+          <div className="detail2-head">
             <h1 className="detail2-title">{data.title}</h1>
             {data.aliases && data.aliases !== data.title && (
               <p className="detail2-aliases">{data.aliases}</p>
             )}
-
             <div className="detail2-meta">
               {data.vote_average > 0 && (
                 <span className="rating-badge">
@@ -415,37 +434,18 @@ export default function SeriesDetail({ seriesId, onClose, onChanged, onAutoFetch
                 <span key={i} className="detail2-meta-item">{bit}</span>
               ))}
             </div>
-
             {data.overview ? (
               <p className="detail2-overview">{data.overview}</p>
             ) : (
               <p className="detail2-overview detail2-overview-empty">{t('series.noOverview')}</p>
             )}
-
-            {!isMovie && data.episode_count > 0 && (
-              <div className="detail2-progress">
-                <div className="detail2-progress-bar">
-                  <div className="detail2-progress-fill" style={{ width: `${progressPct}%` }} />
-                </div>
-                <span className="detail2-progress-text tabular-nums">
-                  {t('series.watchedCount', { watched: data.watched_count, total: data.episode_count })}
-                </span>
-              </div>
-            )}
           </div>
 
-          {/* 操作列：播放 → 收藏 → 元数据 → 删除 */}
+          {/* 操作行：播放 → 收藏 → 元数据 → 删除（删除弹确认） */}
           <div className="detail2-actions">
             <button
-              onClick={() => {
-                if (nextEp) {
-                  const target = data.seasons.flatMap((s) => s.episodes).find((e) => e.id === nextEp.id);
-                  if (target) void playEpisode(target);
-                  return;
-                }
-                if (movieFile) void playEpisode(movieFile);
-              }}
-              className={clsx('detail2-btn primary', heroFocused === 0 && 'gamepad-focus')}
+              onClick={playNextOrMovie}
+              className={clsx('detail2-btn primary', actionsFocused === 0 && 'gamepad-focus')}
             >
               {playLabel === t('series.allWatched')
                 ? <CheckCheck size={17} className="text-green-400" />
@@ -456,7 +456,7 @@ export default function SeriesDetail({ seriesId, onClose, onChanged, onAutoFetch
 
             <button
               onClick={() => void toggleFavorite()}
-              className={clsx('detail2-btn', data.favorite && 'fav-on', heroFocused === 1 && 'gamepad-focus')}
+              className={clsx('detail2-btn', data.favorite && 'fav-on', actionsFocused === 1 && 'gamepad-focus')}
             >
               <Star size={16} className={data.favorite ? 'text-[#ffd75e]' : ''} fill={data.favorite ? 'currentColor' : 'none'} />
               {data.favorite ? t('series.favorited') : t('series.favorite')}
@@ -464,67 +464,66 @@ export default function SeriesDetail({ seriesId, onClose, onChanged, onAutoFetch
 
             <button
               onClick={() => onAutoFetch?.(toCard(data))}
-              className={clsx('detail2-btn', heroFocused === 2 && 'gamepad-focus')}
+              className={clsx('detail2-btn', actionsFocused === 2 && 'gamepad-focus')}
             >
               <Sparkles size={16} />
               {t('series.fetchMeta')}
             </button>
 
             <button
-              onClick={() => onDelete?.(toCard(data))}
-              className={clsx('detail2-btn danger', heroFocused === 3 && 'gamepad-focus')}
+              onClick={() => setConfirmDelete(true)}
+              className={clsx('detail2-btn danger', actionsFocused === 3 && 'gamepad-focus')}
             >
               <Trash2 size={16} />
               {t('series.deleteSeries')}
             </button>
           </div>
-        </div>
 
-        {/* ─── 右栏：季列表 + 集列表（各自内部滚动） ─── */}
-        <div className="detail2-right">
-          {!isMovie && seasons.length > 0 && (
-            <div className="detail2-seasons">
-              <div className="detail2-panel-head">
-                <h2 className="detail2-panel-title">{t('series.seasonsTitle')}</h2>
-                {season && episodes.length > 0 && (
-                  <div className="detail2-panel-tools">
-                    <button
-                      onClick={() => setSeasonWatched(true)}
-                      className="detail2-tool"
-                    >
-                      <CheckCheck size={13} />
-                      {t('series.markSeasonWatched')}
-                    </button>
-                    <button
-                      onClick={() => setSeasonWatched(false)}
-                      className="detail2-tool"
-                    >
-                      <RotateCcw size={13} />
-                      {t('series.resetSeason')}
-                    </button>
-                  </div>
-                )}
-              </div>
-              <div className="detail2-seasons-scroll">
+          {/* 季 chips（焦点即预览；电影不渲染） */}
+          {chipsVisible && (
+            <div className="detail2-chips">
+              <div className="detail2-chips-scroll">
                 {seasons.map((s, i) => (
-                  <div key={s.id} data-season-idx={i}>
-                    <SeasonRow
-                      season={s}
-                      active={s.id === (season?.id ?? '')}
-                      focused={seasonsFocused === i}
-                      onPick={setActiveSeason}
-                    />
-                  </div>
+                  <SeasonChip
+                    key={s.id}
+                    season={s}
+                    index={i}
+                    active={s.id === (season?.id ?? '')}
+                    focused={seasonsFocused === i}
+                    onPick={setActiveSeason}
+                  />
                 ))}
               </div>
             </div>
           )}
 
+          {/* 集列表 */}
           <div className="detail2-eps">
             <div className="detail2-panel-head">
               <h2 className="detail2-panel-title">
-                {season?.name?.trim() || (season ? t('series.seasonN', { n: season.season_number }) : '')}
+                {isMovie
+                  ? t('series.movie')
+                  : (season?.name?.trim() || (season ? t('series.seasonN', { n: season.season_number }) : ''))}
               </h2>
+              <span className="detail2-hint">{t('series.hintEpsKeys')}</span>
+              {season && episodes.length > 0 && !isMovie && (
+                <div className="detail2-panel-tools">
+                  <button
+                    onClick={() => void setSeasonWatchedById(season.id, true)}
+                    className="detail2-tool"
+                  >
+                    <CheckCheck size={13} />
+                    {t('series.markSeasonWatched')}
+                  </button>
+                  <button
+                    onClick={() => void setSeasonWatchedById(season.id, false)}
+                    className="detail2-tool"
+                  >
+                    <RotateCcw size={13} />
+                    {t('series.resetSeason')}
+                  </button>
+                </div>
+              )}
             </div>
             <div ref={epListRef} className="detail2-eps-scroll">
               {episodes.length === 0 ? (
@@ -549,6 +548,72 @@ export default function SeriesDetail({ seriesId, onClose, onChanged, onAutoFetch
           </div>
         </div>
       </div>
+
+      {/* 长按 OK：单集操作表 */}
+      {epSheet && (
+        <ActionSheet
+          title={t('series.epActionsTitle')}
+          subtitle={`${epSheetSe} · ${cleanEpisodeTitle(epSheet.title, epSheet.episode_number)}`}
+          items={[
+            {
+              icon: Play,
+              label: t('series.playEp', { se: epSheetSe }),
+              onSelect: () => void playEpisode(epSheet),
+            },
+            epSheet.watched
+              ? {
+                  icon: RotateCcw,
+                  label: t('series.markUnwatched'),
+                  onSelect: () => void markEpisode(epSheet, false),
+                }
+              : {
+                  icon: Check,
+                  label: t('series.markWatched'),
+                  onSelect: () => void markEpisode(epSheet, true),
+                },
+          ]}
+          onClose={() => setEpSheet(null)}
+        />
+      )}
+
+      {/* 长按 OK：整季操作表 */}
+      {seasonSheet && (
+        <ActionSheet
+          title={t('series.seasonActionsTitle')}
+          subtitle={seasonSheet.name?.trim() || t('series.seasonN', { n: seasonSheet.season_number })}
+          items={[
+            {
+              icon: CheckCheck,
+              label: t('series.markSeasonWatched'),
+              onSelect: () => void setSeasonWatchedById(seasonSheet.id, true),
+            },
+            {
+              icon: RotateCcw,
+              label: t('series.resetSeason'),
+              onSelect: () => void setSeasonWatchedById(seasonSheet.id, false),
+            },
+          ]}
+          onClose={() => setSeasonSheet(null)}
+        />
+      )}
+
+      {/* 删除确认（默认焦点在「取消」） */}
+      {confirmDelete && (
+        <ActionSheet
+          title={t('series.deleteSeries')}
+          subtitle={t('series.deleteConfirm', { title: data.title })}
+          items={[
+            { icon: X, label: t('common.cancel'), onSelect: () => {} },
+            {
+              icon: Trash2,
+              label: t('common.delete'),
+              danger: true,
+              onSelect: () => onDelete?.(toCard(data)),
+            },
+          ]}
+          onClose={() => setConfirmDelete(false)}
+        />
+      )}
     </div>
   );
 }
