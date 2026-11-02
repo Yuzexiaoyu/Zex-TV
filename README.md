@@ -8,11 +8,11 @@
 
   
 
-**📺 影视库** —
+**📺 影视库** 
 
 ![影视库首页](docs/images/home.jpg)
 
-**🎬 剧集详情** — 
+**🎬 剧集详情** 
 
 ![剧集详情](docs/images/series-detail.jpg)
 
