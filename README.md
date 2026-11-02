@@ -6,13 +6,13 @@
 [![中文](https://img.shields.io/badge/语言-中文-orange)](https://github.com/Yuzexiaoyu/Zex-TV)
 [![Version](https://img.shields.io/badge/version-v0.1.0-blue)](https://github.com/Yuzexiaoyu/Zex-TV)
 
-Zex-TV 是 ZEX 影视库的电视端：片源直接读 NAS，遥控器一路走到底，看到哪儿还能和电脑端对上。
+  
 
-**📺 影视库** — 焦点停在哪部剧，背景、进度、选集就跟着展开
+**📺 影视库** —
 
 ![影视库首页](docs/images/home.jpg)
 
-**🎬 剧集详情** — 分季切换与单集进度，右边顺手接上下一集
+**🎬 剧集详情** — 
 
 ![剧集详情](docs/images/series-detail.jpg)
 
