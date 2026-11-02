@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="zh-CN" class="dark">
+<head>
+<meta charset="UTF-8" />
+<title>harness</title>
+<script>
+  const svg = (w, h, label, hue, sub = '') => 'data:image/svg+xml;utf8,' + encodeURIComponent(
+    `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}"><defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="hsl(${hue},55%,42%)"/><stop offset="1" stop-color="hsl(${hue + 50},60%,14%)"/></linearGradient></defs><rect width="100%" height="100%" fill="url(#g)"/><circle cx="${w * 0.72}" cy="${h * 0.35}" r="${h * 0.28}" fill="hsla(${hue + 20},80%,70%,.25)"/><text x="50%" y="55%" font-size="${h / 7}" fill="rgba(255,255,255,.55)" text-anchor="middle" font-family="sans-serif">${label}</text><text x="50%" y="72%" font-size="${h / 14}" fill="rgba(255,255,255,.4)" text-anchor="middle" font-family="sans-serif">${sub}</text></svg>`);
+
+  const base = (id, title, media_type, hue) => ({
+    id, title, aliases: media_type === 'tv' ? 'Severance' : '', overview: '', poster_path: svg(300, 450, title, hue),
+    bg_path: svg(1280, 720, title, hue, 'backdrop'), first_air_date: '2022-02-18', status: '已完结', tmdb_id: 1, tvdb_id: 0,
+    tags: '', favorite: false, vote_average: 8.4, genres: '剧情 · 悬疑 · 科幻', sort_order: 0, media_type,
+    total_seconds: 36000, created_at: '2024-01-01', updated_at: '',
+  });
+
+  const tv = { ...base('s1', '人生切割术', 'tv', 210), overview: '马克·斯考特领导着卢蒙工业公司的一个团队，这些员工的记忆经过手术被切割，工作和个人生活被分隔开来。当一位神秘的同事在公司外出现时，一段揭开工作真相的旅程开始了。' };
+  const mkEp = (sid, sn, n, watched, watched_ms = 0) => ({
+    id: `${sid}-e${n}`, series_id: 's1', season_id: sid, episode_number: n,
+    title: ['早安，马克', '半环', '在察觉中', '你是你', '我们是我们', '隐藏', '亲切', '所有者', '我们是我们', '冷港'][(n - 1) % 10] + (n > 10 ? ` (${n})` : ''),
+    overview: n % 4 === 0 ? '' : `第 ${sn} 季第 ${n} 集：马克被提拔为宏观数据精炼部门主管，新员工海莉在切割后第一天醒来，拒绝接受这份工作。团队发现部门之间的隐秘联系，而公司的规则远比他们想象的更加诡异。`,
+    still_path: n % 5 === 0 ? '' : svg(342, 192, `S${sn}E${n}`, 180 + n * 17),
+    air_date: `2022-0${Math.min(9, n)}-1${n % 10}`, runtime_minutes: 52 + (n % 3) * 4, local_path: n === 7 ? '' : `nas\\TV\\Severance\\S0${sn}E${String(n).padStart(2, '0')}.mkv`,
+    watched_ms, last_watched_at: '', watched, vote_average: n % 3 === 0 ? 0 : 7.6 + n / 20,
+  });
+  const seasons = [
+    { id: 'sa', series_id: 's1', season_number: 1, name: '第 1 季', overview: '', poster_path: '', first_air_date: '', episodes: Array.from({ length: 9 }, (_, i) => mkEp('sa', 1, i + 1, true)) },
+    { id: 'sb', series_id: 's1', season_number: 2, name: '第 2 季', overview: '', poster_path: '', first_air_date: '', episodes: Array.from({ length: 10 }, (_, i) => mkEp('sb', 2, i + 1, i < 3, i === 3 ? 1500000 : 0)) },
+    { id: 'sc', series_id: 's1', season_number: 3, name: '第 3 季', overview: '', poster_path: '', first_air_date: '', episodes: Array.from({ length: 6 }, (_, i) => mkEp('sc', 3, i + 1, false)) },
+  ];
+  const movie = { ...base('m1', '沙丘：第二部', 'movie', 30), bg_path: '', overview: '保罗·厄崔迪与契妮和弗雷曼人联手，踏上向毁灭他家族的阴谋者复仇的战争之路。' };
+  const movieSeason = { id: 'ma', series_id: 'm1', season_number: 1, name: '', overview: '', poster_path: '', first_air_date: '', episodes: [{ ...mkEp('ma', 1, 1, false, 2400000), series_id: 'm1', title: '沙丘2.2024.2160p.mkv', runtime_minutes: 166, local_path: 'nas\\Movies\\Dune.Part.Two.2024.2160p.mkv' }] };
+
+  const card = (s, ss) => ({ ...s, season_count: ss.length, episode_count: ss.reduce((n, x) => n + x.episodes.length, 0), watched_count: ss.reduce((n, x) => n + x.episodes.filter((e) => e.watched).length, 0), local_count: 0, last_watched_at: '2024-05-01', next_episode: null });
+  const library = [card(tv, seasons), card(movie, [movieSeason])].concat(
+    Array.from({ length: 10 }, (_, i) => card({ ...base(`x${i}`, `示例影视 ${i + 1}`, 'tv', i * 33), bg_path: '' }, [])));
+  const detail = (id) => {
+    const [s, ss] = id === 'm1' ? [movie, [movieSeason]] : [tv, seasons];
+    const all = ss.flatMap((x) => x.episodes);
+    return { ...s, seasons: JSON.parse(JSON.stringify(ss)), next_episode: null, episode_count: all.length, watched_count: all.filter((e) => e.watched).length };
+  };
+
+  window.__HARNESS_CALLS = [];
+  window.__TAURI_INTERNALS__ = {
+    metadata: { currentWindow: { label: 'main' }, currentWebview: { windowLabel: 'main', label: 'main' } },
+    transformCallback: (cb) => { const id = Math.floor(Math.random() * 1e9); window[`_${id}`] = cb; return id; },
+    convertFileSrc: (p) => p,
+    invoke: async (cmd, args) => {
+      window.__HARNESS_CALLS.push(cmd);
+      switch (cmd) {
+        case 'get_series_library': return library;
+        case 'get_series_detail': return detail(args.seriesId);
+        case 'get_stats': return { video: { total_seconds: 0, play_count: 0, library_count: library.length, played_count: 0, top: [] }, total_episodes: 0, total_watched_episodes: 0 };
+        case 'get_smb_servers': return [];
+        case 'get_version': return '0.1.0';
+        case 'plugin:event|listen': return 1;
+        default: return null;
+      }
+    },
+  };
+
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const fire = (key, type) => window.dispatchEvent(new KeyboardEvent(type, { key, bubbles: true }));
+  const press = async (key) => { fire(key, 'keydown'); fire(key, 'keyup'); await sleep(160); };
+  const hold = async (key) => { fire(key, 'keydown'); await sleep(750); fire(key, 'keyup'); await sleep(200); };
+  const scene = new URLSearchParams(location.search).get('scene') || 'library';
+  const steps = {
+    library: ['ArrowDown', 'ArrowRight'],
+    detail: ['ArrowDown', 'Enter'],
+    eps: ['ArrowDown', 'Enter', 'ArrowDown', 'ArrowDown', 'ArrowDown', 'ArrowDown'],
+    season: ['ArrowDown', 'Enter', 'ArrowDown', 'ArrowRight'],
+    sheet: ['ArrowDown', 'Enter', 'ArrowDown', 'ArrowDown', 'HOLD'],
+    focusbtn: ['ArrowDown', 'Enter', 'ArrowRight'],
+    movie: ['ArrowDown', 'ArrowRight', 'Enter', 'ArrowDown'],
+    back: ['ArrowDown', 'ArrowDown', 'ArrowDown', 'Enter', 'Escape'],
+  }[scene];
+  window.addEventListener('load', async () => {
+    await sleep(900);
+    for (const k of steps) { if (k === 'HOLD') await hold('Enter'); else await press(k); await sleep(250); }
+    document.title = 'done:' + JSON.stringify(useStack());
+  });
+  function useStack() { return window.__FOCUS?.getState?.().stack ?? null; }
+</script>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="module" src="/src/main.tsx"></script>
+</body>
+</html>

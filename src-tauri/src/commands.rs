@@ -249,6 +249,11 @@ pub fn delete_episode(state: State<'_, AppState>, id: String) -> AppResult<()> {
 // 进度命令
 // ─────────────────────────────────────────────
 
+// 收尾动作（标记看完/整季/批量）：立刻跟肃正核心对一次账（见 sync.rs，内部合并去重）
+fn push_sync(state: &State<'_, AppState>) {
+    crate::sync::sync(state.app.clone());
+}
+
 #[tauri::command(async)]
 pub fn update_watch_progress(state: State<'_, AppState>, episode_id: String, watched_ms: i64) -> AppResult<()> {
     let conn = state.db.lock();
@@ -256,29 +261,57 @@ pub fn update_watch_progress(state: State<'_, AppState>, episode_id: String, wat
         "UPDATE episodes SET watched_ms = ?, last_watched_at = datetime('now') WHERE id = ?",
         params![watched_ms, episode_id],
     )?;
+    // 高频续播点不即时同步：回前台的对账会把它带上去，避免每秒往 NAS 写文件
     Ok(())
 }
 
 #[tauri::command(async)]
 pub fn mark_episode_watched(state: State<'_, AppState>, episode_id: String, watched: bool) -> AppResult<()> {
-    let conn = state.db.lock();
-    conn.execute(
-        // 标记已看时清续播点；取消已看也清零（未看从 0 开始）
-        "UPDATE episodes SET watched = ?1, watched_ms = 0, last_watched_at = CASE WHEN ?1 = 1
-            THEN datetime('now') ELSE last_watched_at END WHERE id = ?2",
-        params![watched as i32, episode_id],
-    )?;
+    {
+        let conn = state.db.lock();
+        conn.execute(
+            // 标记已看时清续播点；取消已看也清零（未看从 0 开始）
+            "UPDATE episodes SET watched = ?1, watched_ms = 0, last_watched_at = CASE WHEN ?1 = 1
+                THEN datetime('now') ELSE last_watched_at END WHERE id = ?2",
+            params![watched as i32, episode_id],
+        )?;
+    }
+    push_sync(&state);
     Ok(())
 }
 
 #[tauri::command(async)]
 pub fn mark_season_watched(state: State<'_, AppState>, season_id: String, watched: bool) -> AppResult<()> {
-    let conn = state.db.lock();
-    conn.execute(
-        "UPDATE episodes SET watched = ?1, watched_ms = 0, last_watched_at = CASE WHEN ?1 = 1
-            THEN datetime('now') ELSE last_watched_at END WHERE season_id = ?2",
-        params![watched as i32, season_id],
-    )?;
+    {
+        let conn = state.db.lock();
+        conn.execute(
+            "UPDATE episodes SET watched = ?1, watched_ms = 0, last_watched_at = CASE WHEN ?1 = 1
+                THEN datetime('now') ELSE last_watched_at END WHERE season_id = ?2",
+            params![watched as i32, season_id],
+        )?;
+    }
+    push_sync(&state);
+    Ok(())
+}
+
+/// 批量标记（详情页「标记此集及之前为已看」/ 整季）：单事务，要么全改要么全不改
+#[tauri::command(async)]
+pub fn mark_episodes_watched(state: State<'_, AppState>, episode_ids: Vec<String>, watched: bool) -> AppResult<()> {
+    {
+        let mut conn = state.db.lock();
+        let tx = conn.transaction()?;
+        {
+            let mut stmt = tx.prepare(
+                "UPDATE episodes SET watched = ?1, watched_ms = 0, last_watched_at = CASE WHEN ?1 = 1
+                    THEN datetime('now') ELSE last_watched_at END WHERE id = ?2",
+            )?;
+            for id in &episode_ids {
+                stmt.execute(params![watched as i32, id])?;
+            }
+        }
+        tx.commit()?;
+    }
+    push_sync(&state);
     Ok(())
 }
 
@@ -289,6 +322,21 @@ pub fn touch_episode_played(state: State<'_, AppState>, episode_id: String) -> A
         "UPDATE episodes SET last_watched_at = datetime('now') WHERE id = ?1",
         params![episode_id],
     )?;
+    Ok(())
+}
+
+/// 手动触发一次肃正对账：设置里保存核心位置后立即同步一次（创建/更新核心文件，
+/// 让对端马上能看到），不必等回前台。后台跑，立即返回。
+#[tauri::command(async)]
+pub fn trigger_sync(state: State<'_, AppState>) -> AppResult<()> {
+    crate::sync::sync(state.app.clone());
+    Ok(())
+}
+
+/// 关闭同步：删掉 NAS 上的核心文件（关了就清干净）。后台跑，立即返回。
+#[tauri::command(async)]
+pub fn sync_purge(state: State<'_, AppState>) -> AppResult<()> {
+    crate::sync::purge(state.app.clone());
     Ok(())
 }
 
@@ -458,7 +506,7 @@ pub fn get_series_detail(state: State<'_, AppState>, series_id: String) -> AppRe
         rows.collect::<Result<Vec<_>, _>>()?
     };
 
-    let mut episodes: Vec<Episode> = {
+    let episodes: Vec<Episode> = {
         let mut stmt = conn.prepare(&format!(
             "SELECT {} FROM episodes WHERE series_id = ? ORDER BY episode_number",
             EPISODE_COLS
@@ -470,20 +518,16 @@ pub fn get_series_detail(state: State<'_, AppState>, series_id: String) -> AppRe
     let episode_count = episodes.len() as i64;
     let watched_count = episodes.iter().filter(|e| e.watched).count() as i64;
 
+    // 一次遍历按季分桶（SQL 已按集号排序，桶内天然有序）
+    let mut by_season: HashMap<String, Vec<Episode>> = HashMap::with_capacity(seasons.len());
+    for ep in episodes {
+        by_season.entry(ep.season_id.clone()).or_default().push(ep);
+    }
+
     let mut next_episode: Option<NextEpisode> = None;
     let mut out = Vec::with_capacity(seasons.len());
     for season in seasons {
-        let mut mine: Vec<Episode> = Vec::new();
-        let mut rest: Vec<Episode> = Vec::new();
-        for ep in episodes.drain(..) {
-            if ep.season_id == season.id {
-                mine.push(ep);
-            } else {
-                rest.push(ep);
-            }
-        }
-        episodes = rest;
-        mine.sort_by_key(|e| e.episode_number);
+        let mine = by_season.remove(&season.id).unwrap_or_default();
         if next_episode.is_none() {
             if let Some(e) = mine.iter().find(|e| !e.watched) {
                 next_episode = Some(NextEpisode {

@@ -3,7 +3,7 @@
 // hover 切换（电视焦点即预览——焦点落在哪张海报，Hero 就显示哪部）。
 // 保留：Hero（跟随焦点）+ 工具栏（添加/筛选/排序，全 chips）+ 海报墙 + 详情入口 + TMDB 进度。
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import { message } from '@tauri-apps/plugin-dialog';
 import {
@@ -17,11 +17,13 @@ import * as api from '../api';
 import TmdbPickerModal from '../components/TmdbPickerModal';
 import type { SeriesCard, TmdbSearchResult } from '../types';
 import { coverSrc, yearOf } from '../utils/media';
+import { reveal } from '../utils/dom';
+import { warmBackdrop, warmStill } from '../utils/backdrop';
 import { useFocusStore, useGamepadGroup, useGamepadFocus, useFocusIndex } from '../gamepad';
 import { useT } from '../i18n';
 
 type FilterKey = 'all' | 'unfinished' | 'finished' | 'favorite';
-type SortKey = 'custom' | 'recent' | 'title' | 'rating';
+type SortKey = 'recent' | 'title' | 'rating';
 
 const FILTERS: Array<{ key: FilterKey; label: string }> = [
   { key: 'all', label: 'common.all' },
@@ -31,14 +33,64 @@ const FILTERS: Array<{ key: FilterKey; label: string }> = [
 ];
 
 const SORTS: Array<{ key: SortKey; label: string }> = [
-  { key: 'custom', label: 'series.sortCustom' },
   { key: 'recent', label: 'series.sortRecent' },
   { key: 'title', label: 'series.sortTitle' },
   { key: 'rating', label: 'series.sortRating' },
 ];
 
-const GRID_GAP = 22;
 const RING_LEN = 2 * Math.PI * 12;
+
+/** 海报卡。memo：遥控器每移一格只有失焦/得焦的两张重渲染（v2 整面海报墙全量重渲染） */
+const PosterCard = memo(function PosterCard({ s, index, focused, onOpen, onPreload }: {
+  s: SeriesCard;
+  index: number;
+  focused: boolean;
+  onOpen: (id: string) => void;
+  onPreload: (id: string) => void;
+}) {
+  const t = useT();
+  const pct = s.episode_count > 0 ? (s.watched_count / s.episode_count) * 100 : 0;
+  const done = s.episode_count > 0 && s.watched_count >= s.episode_count;
+  return (
+    <div data-shelf-item={index} className={clsx('poster-card', focused && 'gamepad-focus')} onClick={() => onOpen(s.id)} onPointerEnter={() => onPreload(s.id)}>
+      <div className="poster-frame">
+        {s.poster_path ? (
+          <img src={coverSrc(s.poster_path, s.updated_at)} alt={s.title} loading="lazy" decoding="async" className="poster-img" draggable={false} />
+        ) : (
+          <div className="poster-img flex items-center justify-center bg-gradient-to-br from-[#2a1a4e] to-[#0d0d2b]">
+            <Film size={42} className="text-text-tertiary" />
+          </div>
+        )}
+        <div className="poster-badges">
+          {done && <span className="poster-done"><CheckCheck size={13} />{t('series.finished')}</span>}
+        </div>
+        {!done && s.media_type === 'tv' && pct > 0 && (
+          <span className="poster-ring">
+            <svg viewBox="0 0 30 30">
+              <circle className="poster-ring-track" cx="15" cy="15" r="12" />
+              <circle
+                className="poster-ring-fill"
+                cx="15" cy="15" r="12"
+                strokeDasharray={RING_LEN}
+                strokeDashoffset={RING_LEN * (1 - pct / 100)}
+              />
+            </svg>
+            <span className="poster-ring-text"><b>{Math.round(pct)}</b><i>%</i></span>
+          </span>
+        )}
+        <div className="poster-caption">
+          <p className="poster-name">{s.title}</p>
+          <p className="poster-sub">
+            {(s.media_type === 'movie'
+              ? [yearOf(s.first_air_date), t('series.movie')]
+              : [yearOf(s.first_air_date), s.season_count > 0 ? t('series.seasonCount', { n: s.season_count }) : '', s.episode_count > 0 ? t('series.episodeCount', { n: s.episode_count }) : '']
+            ).filter(Boolean).join(' · ') || t('series.noInfo')}
+          </p>
+        </div>
+      </div>
+    </div>
+  );
+});
 
 export default function SeriesView() {
   const t = useT();
@@ -49,21 +101,31 @@ export default function SeriesView() {
   const isEmpty = series.length === 0;
 
   const [detailId, setDetailId] = useState<string | null>(null);
+  const [detailReady, setDetailReady] = useState(false);
+  const openDetail = useCallback((id: string) => {
+    setDetailReady(false);
+    setDetailId(id);
+  }, []);
+  const closeDetail = useCallback(() => { setDetailId(null); setDetailReady(false); }, []);
+  const reloadSeries = useCallback(() => { void loadSeries(); }, [loadSeries]);
   const [showAddModal, setShowAddModal] = useState(false);
   const [filter, setFilter] = useState<FilterKey>('all');
-  const [sort, setSort] = useState<SortKey>('custom');
+  const [sort, setSort] = useState<SortKey>('recent');
 
   const fetchingTitle = useAppStore((s) => s.metadataFetchingTitle);
   const fetchPct = useAppStore((s) => s.fetchPct);
   const setFetchingTitle = useAppStore((s) => s.setMetadataFetching);
   const setFetchPct = useAppStore((s) => s.setFetchPct);
+  const setStageBackdrop = useAppStore((s) => s.setStageBackdrop);
+  const setSeriesDetailOpen = useAppStore((s) => s.setSeriesDetailOpen);
   const [picker, setPicker] = useState<{ s: SeriesCard; results: TmdbSearchResult[] } | null>(null);
+  // 刮削已耗秒数：进度长时间停在低位时，给「网络慢/查代理」提示，避免用户以为卡死
+  const [fetchElapsed, setFetchElapsed] = useState(0);
 
   // 焦点所在海报 id（焦点即预览，取代桌面版的 hover）
   const [focusPosterId, setFocusPosterId] = useState<string | null>(null);
 
-  const scrollRef = useRef<HTMLDivElement>(null);
-  const gridRef = useRef<HTMLDivElement>(null);
+  const shelfRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => { void loadSeries(); }, [loadSeries]);
 
@@ -80,6 +142,15 @@ export default function SeriesView() {
     return () => { cancelled = true; un?.(); };
   }, [fetchingTitle]);
 
+  // 刮削计时：fetchingTitle 有值时每秒 +1，用于「较慢」提示；结束即归零
+  useEffect(() => {
+    if (!fetchingTitle) { setFetchElapsed(0); return; }
+    setFetchElapsed(0);
+    const started = Date.now();
+    const id = window.setInterval(() => setFetchElapsed(Math.floor((Date.now() - started) / 1000)), 1000);
+    return () => window.clearInterval(id);
+  }, [fetchingTitle]);
+
   // ─── 列表：筛选 + 排序 ───────────────────
   const visible = useMemo(() => {
     const matched = series.filter((s) => {
@@ -88,7 +159,6 @@ export default function SeriesView() {
       if (filter === 'finished') return s.episode_count > 0 && s.watched_count >= s.episode_count;
       return true;
     });
-    if (sort === 'custom') return matched;
     const byText = (a: string, b: string) => a.localeCompare(b, 'zh-Hans-CN');
     return [...matched].sort((a, b) => {
       switch (sort) {
@@ -121,23 +191,6 @@ export default function SeriesView() {
     [focusPosterId, series, defaultHero],
   );
 
-  // ─── 网格列数实测 ─────────────────────────
-  const [gridCols, setGridCols] = useState(4);
-  useEffect(() => {
-    const grid = gridRef.current;
-    if (!grid) return;
-    const measure = () => {
-      const first = grid.firstElementChild as HTMLElement | undefined;
-      if (!first) return;
-      const stepX = first.getBoundingClientRect().width + GRID_GAP;
-      setGridCols(Math.max(1, Math.round((grid.getBoundingClientRect().width + GRID_GAP) / stepX)));
-    };
-    measure();
-    const ro = new ResizeObserver(measure);
-    ro.observe(grid);
-    return () => ro.disconnect();
-  }, [visible.length]);
-
   // ─── 焦点组 ───────────────────────────────
   const posterFocused = useFocusIndex('grid:series');
   const heroPlayFocused = useGamepadFocus('hero', 0);
@@ -146,12 +199,61 @@ export default function SeriesView() {
   // 空库时唯一可聚焦项 = 「添加影视」按钮
   const addFocused = useGamepadFocus('grid:series', 0);
 
-  // 焦点海报变化 → 更新 hero 预览
+  // 焦点海报变化 → 立即更新 hero（无防抖，用户要求）。解码延迟由邻位预取
+  // （下个 effect）抵消：大图在焦点移动的同时就开始解码，横幅淡入时图已就绪
   useEffect(() => {
-    if (posterFocused >= 0 && posterFocused < visible.length) {
-      setFocusPosterId(visible[posterFocused].id);
-    }
+    if (posterFocused < 0 || posterFocused >= visible.length) return;
+    setFocusPosterId(visible[posterFocused].id);
   }, [posterFocused, visible]);
+
+  const preloadDetail = useCallback((id: string) => {
+    const store = useAppStore.getState();
+    const card = store.detailCache[id] ?? store.series.find((s) => s.id === id);
+    const path = card?.bg_path || card?.poster_path;
+    if (card && path) warmBackdrop(coverSrc(path, card.updated_at));
+    void store.fetchDetail(id).then((detail) => {
+      const bg = detail.bg_path || detail.poster_path;
+      if (bg) warmBackdrop(coverSrc(bg, detail.updated_at));
+      // 预热「入口集」剧照：详情默认落点那一集的剧照提前解码，进去预览面板即时有图
+      // （否则剧照是详情挂载后才开始拉的，刚进去那一下是空的）。入口 = 首个有未看集的
+      // 季里的第一个未看集，与详情 activeSeason/entryIndex 的默认落点一致。
+      const season = detail.seasons.find((s) => s.episodes.some((e) => !e.watched)) ?? detail.seasons[0];
+      const eps = season?.episodes ?? [];
+      const entry = eps.find((e) => !e.watched) ?? eps[0];
+      if (entry?.still_path) warmStill(coverSrc(entry.still_path, detail.updated_at));
+    }).catch(() => {});
+  }, []);
+
+  // 遥控器焦点与默认 Hero 都提前准备数据和背景；鼠标悬停走同一入口。
+  useEffect(() => {
+    if (hero) preloadDetail(hero.id);
+  }, [hero, preloadDetail]);
+
+  // 详情页打开/关闭 → 通知 App 隐藏/恢复顶部导航（详情全屏沉浸盖住导航）
+  useEffect(() => {
+    setSeriesDetailOpen(detailId != null);
+  }, [detailId, setSeriesDetailOpen]);
+
+  // 共享背景层的图源：开着详情时取该剧（与打开瞬间的 Hero 同一张），否则取 Hero。
+  // 两者在进详情的那一刻必然相等 → 背景不切换，只是从 Hero 条带展开到整画布。
+  useEffect(() => {
+    const card = detailId ? (series.find((s) => s.id === detailId) ?? hero) : hero;
+    const path = card?.bg_path || card?.poster_path || '';
+    setStageBackdrop({
+      src: path ? coverSrc(path, card!.updated_at) : '',
+      poster: !!card && !card.bg_path && !!card.poster_path,
+    });
+  }, [detailId, hero, series, setStageBackdrop]);
+
+  useEffect(() => {
+    if (isEmpty || posterFocused < 0) return;
+    const id = window.setTimeout(() => {
+      const s = visible[posterFocused + 1];
+      const path = s?.bg_path || s?.poster_path;
+      if (s && path) warmBackdrop(coverSrc(path, s.updated_at));
+    }, 150);
+    return () => window.clearTimeout(id);
+  }, [posterFocused, visible, isEmpty]);
 
   // 切筛选后列表变短，栈里的焦点索引可能越界（如「全部」第 20 张 → 切「收藏」只剩 3 张，
   // 焦点停在 19：无高亮、hero 不跟随、按键像失灵）。项数变化时把越界焦点收到最后一项
@@ -171,15 +273,13 @@ export default function SeriesView() {
 
   useGamepadGroup('grid:series', {
     count: isEmpty ? 1 : visible.length, // 空库时 1 = 添加按钮
-    cols: gridCols,
+    cols: isEmpty ? 1 : visible.length, // 单行横排：一行就是全部，左右在行内移动
+    wrap: !isEmpty, // 海报行环形：末张按右到首张、首张按左到末张（空库态不绕）
     activate: (i) => {
       if (isEmpty) { setShowAddModal(true); return; }
-      const s = visible[i]; if (s) setDetailId(s.id);
+      const s = visible[i]; if (s) openDetail(s.id);
     },
-    scrollIntoView: (i) => {
-      const card = gridRef.current?.children[i] as HTMLElement | undefined;
-      card?.scrollIntoView({ block: 'nearest' });
-    },
+    scrollIntoView: (i) => reveal(shelfRef.current, `[data-shelf-item="${i}"]`, 'x'),
     leave: (dir, index) => {
       if (isEmpty) {
         // 影视库在顶部导航的序号是 0（焦点落 nav 哪项页面就切到哪项）
@@ -187,8 +287,7 @@ export default function SeriesView() {
         return;
       }
       if (dir === 'up') {
-        const col = index % gridCols;
-        useFocusStore.getState().switchTo('series-toolbar', Math.min(col, toolbarCount - 1));
+        useFocusStore.getState().switchTo('series-toolbar', Math.min(index, toolbarCount - 1));
       }
     },
   });
@@ -215,9 +314,8 @@ export default function SeriesView() {
     activate: (i) => {
       if (!hero) return;
       if (i === 0) void playNext(hero);
-      else setDetailId(hero.id);
+      else openDetail(hero.id);
     },
-    scrollIntoView: () => { scrollRef.current?.scrollTo({ top: 0 }); },
     leave: (dir) => {
       // 「上」必须能回顶部导航——hero 是本页最上层，之前只处理 down，
       // 焦点停在 hero 按「上」无声无息，出不去这一页
@@ -229,7 +327,7 @@ export default function SeriesView() {
   // ─── 操作 ──────────────────────────────────
   const playNext = async (s: SeriesCard) => {
     const ep = s.next_episode;
-    if (!ep) { setDetailId(s.id); return; }
+    if (!ep) { openDetail(s.id); return; }
     if (!ep.local_path) {
       void message(t('series.epNoFile'), { title: t('series.cannotPlay'), kind: 'warning' });
       return;
@@ -249,6 +347,7 @@ export default function SeriesView() {
     try {
       await api.autoFetchSeriesMetadata(s.id, tmdbId);
       await loadSeries();
+      useAppStore.getState().bumpData(); // 详情页开着时就地刷新元数据
     } catch (err) {
       void message(t('series.fetchFailed', { msg: String(err) }), { title: t('common.error'), kind: 'error' });
     } finally {
@@ -272,23 +371,27 @@ export default function SeriesView() {
     }
   };
 
-  if (detailId) {
-    return (
-      <SeriesDetail
-        seriesId={detailId}
-        onClose={() => setDetailId(null)}
-        onChanged={() => { void loadSeries(); }}
-        onAutoFetch={handleAutoFetch}
-        onDelete={async (s) => {
-          try { await api.deleteSeries(s.id); setDetailId(null); await loadSeries(); }
-          catch (err) { void message(t('series.deleteFailed', { msg: String(err) }), { title: t('common.error'), kind: 'error' }); }
-        }}
-      />
-    );
-  }
-
   return (
-    <div ref={scrollRef} className="h-full overflow-y-auto">
+    <>
+      {detailId && (
+        <SeriesDetail
+          key={detailId}
+          seriesId={detailId}
+          onReadyChange={setDetailReady}
+          initial={series.find((x) => x.id === detailId)}
+          onClose={closeDetail}
+          onChanged={reloadSeries}
+          onAutoFetch={handleAutoFetch}
+          onDelete={async (s) => {
+            try { await api.deleteSeries(s.id); setDetailId(null); await loadSeries(); }
+            catch (err) { void message(t('series.deleteFailed', { msg: String(err) }), { title: t('common.error'), kind: 'error' }); }
+          }}
+        />
+      )}
+      {/* 单屏三段式：hero / 工具栏 / 海报行全部强制在一屏内，整页不滚动。
+          详情页盖在上面时整体只隐藏不卸载：返回时海报行横向滚动位置与焦点原样，
+          不必重建上百张海报（重新解码 + 入场动画） */}
+      <div className={clsx('h-full flex flex-col overflow-hidden', detailId && detailReady && 'invisible')}>
       {series.length === 0 ? (
         <div className="h-full flex flex-col items-center justify-center gap-6">
           <div className="empty-orb"><Tv size={42} /></div>
@@ -308,16 +411,8 @@ export default function SeriesView() {
         <>
           {hero && (
             <section className="hero">
-              {(hero.bg_path || hero.poster_path) && (
-                <img
-                  key={`bg-${hero.id}`}
-                  className={clsx('hero-bg', !hero.bg_path && 'hero-bg-poster')}
-                  src={coverSrc(hero.bg_path || hero.poster_path, hero.updated_at)}
-                  alt=""
-                />
-              )}
               <div className="hero-shade" />
-              <div className="hero-content" key={`content-${hero.id}`}>
+              <div className="hero-content">
                 <h1 className="hero-title">{hero.title}</h1>
                 <div className="hero-meta">
                   {hero.vote_average > 0 && (
@@ -352,7 +447,7 @@ export default function SeriesView() {
                       </>
                     ) : t('series.viewDetail')}
                   </button>
-                  <button className={clsx('btn btn-glass px-6 py-3.5 text-base', heroDetailFocused && 'gamepad-focus')} onClick={() => setDetailId(hero.id)}>
+                  <button className={clsx('btn btn-glass px-6 py-3.5 text-base', heroDetailFocused && 'gamepad-focus')} onClick={() => openDetail(hero.id)} onPointerEnter={() => preloadDetail(hero.id)}>
                     <Film size={16} />
                     {t('series.episodeDetails')}
                   </button>
@@ -361,8 +456,8 @@ export default function SeriesView() {
             </section>
           )}
 
-          {/* 工具栏（滚动时吸顶） */}
-          <div className="sticky top-0 z-20 glass border-b border-border-glass px-8 py-4 flex items-center gap-3 flex-wrap">
+          {/* 工具栏：添加 / 筛选 / 排序（单屏布局固定可见，不再吸顶） */}
+          <div className="series-toolbar shrink-0 px-8 py-3 flex items-center gap-3">
             <button className={clsx('btn btn-accent gap-2 text-base', toolbarFocused === 0 && 'gamepad-focus')} onClick={() => setShowAddModal(true)}>
               <Plus size={17} />
               {t('series.addSeries')}
@@ -393,67 +488,22 @@ export default function SeriesView() {
             </div>
           </div>
 
-          {/* 海报墙 */}
-          <div className="px-8 py-6">
+          {/* 海报行：无论多少部都排成一行，行内横向滚动（页面不动） */}
+          <div ref={shelfRef} className="poster-shelf">
             {visible.length === 0 ? (
-              <div className="py-20 flex flex-col items-center gap-3">
-                <Film size={36} className="text-text-tertiary" />
+              <div className="shelf-empty">
+                <Film size={34} className="text-text-tertiary" />
                 <p className="text-base text-text-secondary">{t('series.noMatch')}</p>
               </div>
             ) : (
-              <div ref={gridRef} className="poster-grid">
-                {visible.map((s, idx) => {
-                  const pct = s.episode_count > 0 ? (s.watched_count / s.episode_count) * 100 : 0;
-                  const done = s.episode_count > 0 && s.watched_count >= s.episode_count;
-                  return (
-                    <div
-                      key={s.id}
-                      className={clsx('poster-card', idx === posterFocused && 'gamepad-focus')}
-                      onClick={() => setDetailId(s.id)}
-                    >
-                      <div className="poster-frame">
-                        {s.poster_path ? (
-                          <img src={coverSrc(s.poster_path, s.updated_at)} alt={s.title} loading="lazy" className="poster-img" draggable={false} />
-                        ) : (
-                          <div className="poster-img flex items-center justify-center bg-gradient-to-br from-[#2a1a4e] to-[#0d0d2b]">
-                            <Film size={42} className="text-text-tertiary" />
-                          </div>
-                        )}
-                        <div className="poster-badges">
-                          {done && <span className="poster-done"><CheckCheck size={13} />{t('series.finished')}</span>}
-                        </div>
-                        {!done && s.media_type === 'tv' && pct > 0 && (
-                          <span className="poster-ring">
-                            <svg viewBox="0 0 30 30">
-                              <circle className="poster-ring-track" cx="15" cy="15" r="12" />
-                              <circle
-                                className="poster-ring-fill"
-                                cx="15" cy="15" r="12"
-                                strokeDasharray={RING_LEN}
-                                strokeDashoffset={RING_LEN * (1 - pct / 100)}
-                              />
-                            </svg>
-                            <span className="poster-ring-text"><b>{Math.round(pct)}</b><i>%</i></span>
-                          </span>
-                        )}
-                        <div className="poster-caption">
-                          <p className="poster-name">{s.title}</p>
-                          <p className="poster-sub">
-                            {(s.media_type === 'movie'
-                              ? [yearOf(s.first_air_date), t('series.movie')]
-                              : [yearOf(s.first_air_date), s.season_count > 0 ? t('series.seasonCount', { n: s.season_count }) : '', s.episode_count > 0 ? t('series.episodeCount', { n: s.episode_count }) : '']
-                            ).filter(Boolean).join(' · ') || t('series.noInfo')}
-                          </p>
-                        </div>
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
+              visible.map((s, idx) => (
+                <PosterCard key={s.id} s={s} index={idx} focused={idx === posterFocused} onOpen={openDetail} onPreload={preloadDetail} />
+              ))
             )}
           </div>
         </>
       )}
+      </div>
 
       {picker && (
         <TmdbPickerModal
@@ -481,8 +531,13 @@ export default function SeriesView() {
             </div>
             <span className="text-sm text-text-secondary w-10 text-right tabular-nums">{Math.round(fetchPct)}%</span>
           </div>
+          {fetchElapsed >= 15 && (
+            <p className="text-xs text-text-tertiary">
+              {fetchElapsed >= 40 ? t('series.fetchVerySlow') : t('series.fetchSlow')}
+            </p>
+          )}
         </div>
       )}
-    </div>
+    </>
   );
 }

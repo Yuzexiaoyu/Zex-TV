@@ -41,8 +41,8 @@ export default function WatchedPromptModal({ episodeId, onClose }: Props) {
     try {
       if (watched) {
         await api.markEpisodeWatched(episodeId, true);
-        await loadSeries();
-        await loadStats();
+        useAppStore.getState().bumpData();
+        await Promise.allSettled([loadSeries(), loadStats()]);
       }
     } catch {
       /* 静默：标记失败不影响关闭 */
@@ -53,7 +53,7 @@ export default function WatchedPromptModal({ episodeId, onClose }: Props) {
 
   return (
     <div className="fixed inset-0 z-[250] flex items-center justify-center p-8">
-      <div className="absolute inset-0 bg-black/70 backdrop-blur-sm animate-fade-in" />
+      <div className="absolute inset-0 bg-black/75 animate-fade-in" />
       <div className="relative glass-modal shadow-2xl animate-scale-in px-10 py-8 flex flex-col items-center gap-6">
         <div className="empty-orb mx-auto" style={{ width: 72, height: 72 }}>
           <Check size={36} />

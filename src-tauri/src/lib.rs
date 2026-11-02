@@ -23,6 +23,7 @@ mod commands;
 mod db;
 mod smb;
 mod stream_server;
+mod sync;
 mod tmdb;
 
 // ─────────────────────────────────────────────
@@ -63,6 +64,12 @@ pub struct AppState {
     /// TMDB 抓取全局锁：同一时刻只允许一个刮削在跑（前端切库后组件状态丢失，
     /// 防重入必须落在后端；guard 析构自动释放）。M2 启用。
     pub metadata_fetching: Arc<AtomicBool>,
+    /// 肃正协议：同步任务在跑 / 有待跑请求。两个原子做「合并去重 + 串行化」，
+    /// 保证同一时刻只有一个任务读改写核心文件（见 sync.rs）
+    pub sync_running: Arc<AtomicBool>,
+    pub sync_pending: Arc<AtomicBool>,
+    /// 供命令层写库后触发肃正对账（AppHandle 可克隆、Send+Sync）
+    pub app: tauri::AppHandle,
 }
 
 // ─────────────────────────────────────────────
@@ -148,7 +155,12 @@ pub fn run() {
                 db: Arc::new(Mutex::new(conn)),
                 data_dir,
                 metadata_fetching: Arc::new(AtomicBool::new(false)),
+                sync_running: Arc::new(AtomicBool::new(false)),
+                sync_pending: Arc::new(AtomicBool::new(false)),
+                app: app.handle().clone(),
             });
+            // 冷启动先对账一次（电视几乎不冷启，日常主要靠回前台的 Resumed 兜）
+            crate::sync::sync(app.handle().clone());
             log::info!("ZEX TV started successfully");
             Ok(())
         })
@@ -174,6 +186,7 @@ pub fn run() {
             commands::update_watch_progress,
             commands::mark_episode_watched,
             commands::mark_season_watched,
+            commands::mark_episodes_watched,
             commands::touch_episode_played,
             // Library / Detail
             commands::get_series_library,
@@ -197,6 +210,9 @@ pub fn run() {
             // 播放（M3）
             commands::play_episode,
             commands::take_current_episode,
+            // 肃正协议（跨端进度同步）
+            commands::trigger_sync,
+            commands::sync_purge,
             // App
             commands::get_version,
         ])
@@ -216,6 +232,11 @@ pub fn run() {
                 use tauri::Emitter;
                 let app = _app;
                 let _ = app.emit("app-resumed", ());
+                // 回到 App = 播放结束，停掉播放期间的前台服务（见 stream_server.rs）
+                crate::stream_server::stop_stream_service(app);
+                // 肃正协议：回前台就是「重新打开软件」这一刻——跟核心文件对一次账。
+                // 电视 singleTask 常驻不冷启，冷启动的 setup 那次跑不到，全靠这里。
+                crate::sync::sync(app.clone());
             }
             _ => {}
         });

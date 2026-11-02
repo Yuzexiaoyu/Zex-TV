@@ -1,40 +1,52 @@
-// 影视详情页（电视版，v3 重构）。
+// 影视详情页（电视版 v5，完全重构）。
 //
-// 动线（v2 三个纵向列表互相横跳 → v3 单纵列高速路）：
-//   右栏自上而下三条横排：操作行（播放/收藏/元数据/删除）→ 季 chips → 集列表。
-//   下/上 = 在三条排之间移动；左/右 = 只在排内移动，行首/行尾停住。
-//   每个键的行为唯一可预期，v2 的「集列表左右=换季」隐形跳转废除。
+// 布局：全屏沉浸（盖住顶部导航），整幅剧照铺底 + 左/下渐变压暗。
+//   上：标题 / 元信息 / 简介 / 操作行（播放 · 收藏 · 元数据 · 删除）
+//   下：季标签（带进度）+ 左侧集列表 + 右侧单集预览（剧照 / 单集简介 / 文件）
+//   电影：无季标签、无预览，只有一行影片文件。
 //
-//   - 季 chips 焦点即预览：焦点移到哪个 chip，集列表实时切到该季
-//     （与影视库「焦点落在哪张海报 Hero 就显示哪部」同一套语言）。
-//   - OK/下 从 chips 进集列表，落到该季第一个未看集（全看完落第 0 集）。
-//   - 长按 OK：集行 → 单集操作表（播放/标记已看未看）；季 chip → 整季操作表
-//     （整季标已看/重置）。v2 的头部小按钮遥控器聚焦不到，只能鼠标点。
-//   - 删除影视走确认弹窗，默认焦点在「取消」（v2 里 OK 落在删除键 = 立即删除）。
-//   - 电影不渲染季 chips：操作行「下」直达文件行，文件行「上」回操作行。
-//   - 返回 = 遥控器 Back（焦点栈弹层 → onClose）。
+// 动线（沿用 v3 的单纵列高速路，已经过真机验证）：
+//   操作行 ↕ 季标签 ↕ 集列表；横排行内左/右移动，行首/行尾停住；
+//   焦点在集列表时左右 = 翻上/下一季（同集序号续走，首尾季停住）。
+//   - 季标签焦点即预览：焦点移到哪季，集列表与预览面板立刻切过去。
+//   - OK/下 从季标签进集列表，落在该季第一个未看集。
+//   - 长按 OK：集 → 单集操作表（播放 / 标记 / 标记此集及之前）；季 → 整季操作表。
+//   - 删除走确认表，默认焦点在「取消」。Back = 关详情。
 //
-// 性能（沿用 v2 结论）：整页不滚动、只有集列表内部滚；行组件 React.memo；
-// 一次只渲染一季；transition 只挂焦点相关属性（电视 GPU 弱，all 会卡）。
+// 性能：
+//   - 整页不滚动，只有集列表内滚；滚动用 scrollTop 手算（scrollIntoView 会连带
+//     滚动 overflow:hidden 的祖先，布局会被整体顶歪）。
+//   - 行/季标签/预览都 memo；标记已看只替换受影响的季对象，其余行不重渲染。
+//   - 预览（文字+剧照）即时跟随焦点：剧照复用同一个 <img> 直接换 src，浏览器
+//     保留旧帧直到新图解码完（永不闪空）；邻集（±1/±2）剧照预取让落点即点即显。
+//   - 不用 backdrop-filter；transition 只挂 transform/颜色。
+//   - 标记已看乐观更新：先改界面再请求，失败回滚（遥控器按下即见结果）。
 
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import { message } from '@tauri-apps/plugin-dialog';
 import {
-  Play, Star, Check, CheckCheck, RotateCcw, Loader2,
-  Film, Sparkles, Trash2, X,
+  Play, Star, Check, CheckCheck, RotateCcw, Loader2, Film, Sparkles, Trash2, X, ListChecks,
 } from 'lucide-react';
 import { clsx } from 'clsx';
 import * as api from '../api';
-import type { Episode, Season, SeriesCard, SeriesDetailData } from '../types';
-import { cleanEpisodeTitle, coverSrc, formatDuration, formatRuntime, watchPercent, yearOf } from '../utils/media';
+import type { Episode, SeasonWithEpisodes, SeriesCard, SeriesDetailData } from '../types';
+import {
+  cleanEpisodeTitle, coverSrc, formatDuration, formatRuntime, watchPercent, yearOf,
+} from '../utils/media';
+import { reveal } from '../utils/dom';
+import { warmStill } from '../utils/backdrop';
 import { useFocusStore, useGamepadGroup, useFocusIndex } from '../gamepad';
-import ActionSheet from '../components/ActionSheet';
-import { useT } from '../i18n';
+import { useAppStore } from '../store';
+import ActionSheet, { type ActionSheetItem } from '../components/ActionSheet';
+import { t as tr, useT } from '../i18n';
 
 interface Props {
   seriesId: string;
+  /** 影视库卡片：详情还在加载时先用它画出头部（标题/剧照/简介），打开即有画面 */
+  initial?: SeriesCard;
   onClose: () => void;
+  onReadyChange?: (ready: boolean) => void;
   onChanged?: () => void;
   onAutoFetch?: (s: SeriesCard) => void;
   onDelete?: (s: SeriesCard) => void;
@@ -42,263 +54,295 @@ interface Props {
 
 const DETAIL_GROUPS = ['detail-actions', 'detail-seasons', 'detail-episodes'] as const;
 
+const pad2 = (n: number) => String(n).padStart(2, '0');
+const seLabel = (s: number, e: number) => `S${pad2(s)}E${pad2(e)}`;
+const seasonName = (s: SeasonWithEpisodes) => s.name?.trim() || tr('series.seasonN', { n: s.season_number });
+
 /** 进集列表的落点：该季第一个未看集（都看完了落第 0 集） */
 function entryIndex(eps: Episode[]): number {
   const i = eps.findIndex((e) => !e.watched);
   return i >= 0 ? i : 0;
 }
 
-/** 集行。memo：焦点移动/标记一集时，其它行不重渲染 */
-const EpRow = memo(function EpRow({ ep, index, isMovie, seriesTitle, focused, onPlay }: {
+function remainingMin(ep: Episode): number {
+  if (!ep.runtime_minutes || !ep.watched_ms || ep.watched) return 0;
+  return Math.max(1, Math.round(ep.runtime_minutes - ep.watched_ms / 60000));
+}
+
+function episodeTitle(ep: Episode, isMovie: boolean, seriesTitle: string): string {
+  const cleaned = cleanEpisodeTitle(ep.title, ep.episode_number);
+  if (!isMovie) return cleaned;
+  return cleaned.replace(/^第 \d+ 集$/, seriesTitle) || seriesTitle;
+}
+
+const fileNameOf = (path: string) => (path ? path.split(/[/\\]/).pop() ?? '' : '');
+
+// ─── 集行 ──────────────────────────────────────
+const EpRow = memo(function EpRow({ ep, index, title, sub, focused, onPlay }: {
   ep: Episode;
   index: number;
-  isMovie: boolean;
-  seriesTitle: string;
+  title: string;
+  sub: string;
   focused: boolean;
   onPlay: (ep: Episode) => void;
 }) {
-  const t = useT();
   const pct = ep.watched ? 100 : watchPercent(ep.watched_ms, ep.runtime_minutes);
+  const partial = !ep.watched && pct > 0;
   return (
     <button
       data-ep-row={index}
       onClick={() => onPlay(ep)}
       className={clsx(
-        'ep-row2',
+        'dt-ep',
         ep.watched && 'watched',
-        !ep.watched && pct > 0 && 'watching',
+        !ep.local_path && 'nofile',
         focused && 'gamepad-focus',
       )}
     >
-      <span className="ep-row2-num">E{String(ep.episode_number).padStart(2, '0')}</span>
-      <span className="ep-row2-body">
-        <span className="ep-row2-title">
-          {isMovie
-            ? (cleanEpisodeTitle(ep.title, ep.episode_number).replace(/^第 \d+ 集$/, seriesTitle) || seriesTitle)
-            : cleanEpisodeTitle(ep.title, ep.episode_number)}
-          {ep.vote_average > 0 && (
-            <span className="ep-row2-vote"><Star size={11} fill="currentColor" />{ep.vote_average.toFixed(1)}</span>
-          )}
-          {ep.watched && <Check size={13} className="ep-row2-done-icon" />}
-        </span>
-        <span className="ep-row2-meta">
-          {ep.air_date && <span className="tabular-nums">{ep.air_date.slice(0, 10)}</span>}
-          {ep.runtime_minutes > 0 && <span>{formatRuntime(ep.runtime_minutes)}</span>}
-          <span className={clsx('truncate', !ep.local_path && 'text-[#f59e0b]/80')}>
-            {ep.local_path ? ep.local_path.split(/[/\\]/).pop() : t('series.epNoLocalFile')}
-          </span>
-        </span>
+      <span className="dt-ep-num">{pad2(ep.episode_number)}</span>
+      <span className="dt-ep-main">
+        <span className="dt-ep-title">{title}</span>
+        {sub && <span className="dt-ep-sub">{sub}</span>}
       </span>
-      <span className={clsx('ep-row2-badge', ep.watched ? 'done' : pct > 0 ? 'watching' : '')}>
-        {ep.watched ? <Check size={12} strokeWidth={3} /> : pct > 0 ? `${Math.round(pct)}%` : <Play size={12} fill="currentColor" />}
+      <span className="dt-ep-dur">{formatRuntime(ep.runtime_minutes)}</span>
+      <span className={clsx('dt-ep-badge', ep.watched ? 'done' : partial ? 'partial' : '')}>
+        {ep.watched
+          ? <Check size={15} strokeWidth={3} />
+          : partial ? `${Math.round(pct)}%` : <Play size={13} fill="currentColor" />}
       </span>
+      {partial && <span className="dt-ep-progress"><i style={{ width: `${pct}%` }} /></span>}
     </button>
   );
 });
 
-/** 季 chip（横向） */
-const SeasonChip = memo(function SeasonChip({ season, index, active, focused, onPick }: {
-  season: Season & { episodes: Episode[] };
+// ─── 季标签 ────────────────────────────────────
+const SeasonTab = memo(function SeasonTab({ season, index, active, focused, onPick }: {
+  season: SeasonWithEpisodes;
   index: number;
   active: boolean;
   focused: boolean;
   onPick: (id: string) => void;
 }) {
-  const t = useT();
-  const watched = season.episodes.filter((e) => e.watched).length;
   const total = season.episodes.length;
+  const watched = season.episodes.reduce((n, e) => n + (e.watched ? 1 : 0), 0);
   const done = total > 0 && watched === total;
   return (
     <button
-      data-season-chip={index}
+      data-season-tab={index}
       onClick={() => onPick(season.id)}
-      className={clsx('season-chip', active && 'active', focused && 'gamepad-focus')}
+      className={clsx('dt-tab', active && 'active', done && 'done', focused && 'gamepad-focus')}
     >
-      <span className="season-chip-name">
-        {season.name?.trim() || t('series.seasonN', { n: season.season_number })}
+      <span className="dt-tab-name">{seasonName(season)}</span>
+      <span className="dt-tab-count tabular-nums">
+        {done ? <CheckCheck size={14} /> : `${watched}/${total}`}
       </span>
-      <span className={clsx('season-chip-count tabular-nums', done && 'done')}>
-        {watched}/{total}
-      </span>
+      <span className="dt-tab-bar"><i style={{ width: total ? `${(watched / total) * 100}%` : '0%' }} /></span>
     </button>
   );
 });
 
-export default function SeriesDetail({ seriesId, onClose, onChanged, onAutoFetch, onDelete }: Props) {
+// ─── 单集预览 ──────────────────────────────────
+// 剧照即时切换：复用同一个 <img> 直接换 src（不能加 key——重挂载会清掉已显示
+// 的帧），浏览器保留旧帧直到新图解码完成，即解码即显示，全程不闪空。
+const EpisodePreview = memo(function EpisodePreview({ ep, seasonNo, kicker, title, version }: {
+  ep: Episode;
+  seasonNo: number;
+  kicker: string;
+  title: string;
+  version: string;
+}) {
   const t = useT();
-  const [data, setData] = useState<SeriesDetailData | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [activeSeason, setActiveSeason] = useState('');
+  const target = ep.still_path ? coverSrc(ep.still_path, version) : '';
+
+  // 剧照用「已解码节点」挂入（见 utils/backdrop）：首次进详情时入口集剧照已在
+  // 预取阶段解码好，这里直接挂同一个节点 → 和整页一起出现，不再慢一两帧。
+  // 换集时新节点解码完才替换，旧帧保留，不闪空。
+  const stillHostRef = useRef<HTMLSpanElement>(null);
+  useLayoutEffect(() => {
+    const host = stillHostRef.current;
+    if (!host) return;
+    if (!target) { host.replaceChildren(); return; }
+    const entry = warmStill(target);
+    let cancelled = false;
+    const put = (ok: boolean) => { if (!cancelled && ok) host.replaceChildren(entry.image); };
+    if (entry.ready) put(true);
+    else void entry.promise.then(put);
+    return () => { cancelled = true; };
+  }, [target]);
+  const pct = ep.watched ? 0 : watchPercent(ep.watched_ms, ep.runtime_minutes);
+  const left = remainingMin(ep);
+  const meta = [
+    ep.air_date ? ep.air_date.slice(0, 10) : '',
+    formatRuntime(ep.runtime_minutes),
+    left ? t('series.remainingMin', { n: left }) : '',
+  ].filter(Boolean);
+  const file = fileNameOf(ep.local_path);
+
+  return (
+    <aside className="dt-preview">
+      <div className="dt-still">
+        <span className="dt-still-fallback">{seLabel(seasonNo, ep.episode_number)}</span>
+        <span ref={stillHostRef} className="dt-still-img" />
+        {ep.watched && (
+          <span className="dt-still-flag"><Check size={13} strokeWidth={3} />{t('series.watched')}</span>
+        )}
+        {pct > 0 && <span className="dt-still-progress"><i style={{ width: `${pct}%` }} /></span>}
+      </div>
+      <p className="dt-pv-kicker">{kicker}</p>
+      <h3 className="dt-pv-title">{title}</h3>
+      {(meta.length > 0 || ep.vote_average > 0) && (
+        <div className="dt-pv-meta">
+          {ep.vote_average > 0 && (
+            <span className="dt-pv-vote"><Star size={12} fill="currentColor" />{ep.vote_average.toFixed(1)}</span>
+          )}
+          {meta.map((m) => <span key={m}>{m}</span>)}
+        </div>
+      )}
+      <p className={clsx('dt-pv-overview', !ep.overview && 'empty')}>
+        {ep.overview || t('series.noEpOverview')}
+      </p>
+      <p className={clsx('dt-pv-file', !file && 'missing')}>{file || t('series.epNoLocalFile')}</p>
+    </aside>
+  );
+});
+
+export default function SeriesDetail({ seriesId, initial, onClose, onReadyChange, onChanged, onAutoFetch, onDelete }: Props) {
+  const t = useT();
+  // 打开即时出：优先用「焦点停留时预取」的缓存渲染（stale-while-revalidate，load() 仍拉最新回写）
+  const [data, setData] = useState<SeriesDetailData | null>(() => useAppStore.getState().detailCache[seriesId] ?? null);
+  const [activeSeason, setActiveSeason] = useState(() => {
+    const c = useAppStore.getState().detailCache[seriesId];
+    if (!c) return '';
+    return (c.seasons.find((s) => s.episodes.some((e) => !e.watched)) ?? c.seasons[0])?.id ?? '';
+  });
+
   const epListRef = useRef<HTMLDivElement>(null);
+  const tabsRef = useRef<HTMLDivElement>(null);
 
   // 长按 OK 弹出的操作表（集/季）与删除确认
   const [epSheet, setEpSheet] = useState<Episode | null>(null);
-  const [seasonSheet, setSeasonSheet] = useState<(Season & { episodes: Episode[] }) | null>(null);
+  const [seasonSheet, setSeasonSheet] = useState<SeasonWithEpisodes | null>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
 
-  const load = useCallback(async (keepSeason = true) => {
-    const detail = await api.getSeriesDetail(seriesId);
+  // ─── 数据 ─────────────────────────────────
+  const cachedAtMount = useRef(!!useAppStore.getState().detailCache[seriesId]); // 挂载时是否已有预取数据
+  const loadSequence = useRef(0);
+  useEffect(() => () => { loadSequence.current++; }, []);
+  const load = useCallback(async (fresh = true) => {
+    const seq = ++loadSequence.current;
+    const detail = await useAppStore.getState().fetchDetail(seriesId, fresh);
+    if (seq !== loadSequence.current) return;
     setData(detail);
     setActiveSeason((prev) => {
-      if (keepSeason && prev && detail.seasons.some((s) => s.id === prev)) return prev;
-      return detail.next_episode?.season_id || detail.seasons[0]?.id || '';
+      if (prev && detail.seasons.some((s) => s.id === prev)) return prev;
+      const next = detail.seasons.find((s) => s.episodes.some((e) => !e.watched));
+      return next?.id || detail.seasons[0]?.id || '';
     });
-    return detail;
   }, [seriesId]);
 
   useEffect(() => {
-    let alive = true;
-    setLoading(true);
-    load(false)
-      .catch((err) => { void message(t('series.loadFailed', { msg: String(err) }), { title: t('common.error'), kind: 'error' }); })
-      .finally(() => { if (alive) setLoading(false); });
-    return () => { alive = false; };
+    if (cachedAtMount.current) return; // 有预取数据则跳过开屏重复拉取（省 ~600ms IPC+重渲染）；新鲜度由 dataVersion/app-resumed 兜底
+    load(false).catch((err) => {
+      void message(t('series.loadFailed', { msg: String(err) }), { title: t('common.error'), kind: 'error' });
+    });
   }, [load]);
 
-  // 播放器退出后进度/已看变了，重拉详情。App 回前台（app-resumed）即刷新：
-  // 系统播放器退出回到本页时观看状态/进度已经变了（「看完了吗」回执也会触发）
+  // data 变化（load 完成 / 标记已看 / 收藏）→ 回写预取缓存，下次打开即时且最新
+  useEffect(() => {
+    if (data) useAppStore.getState().cacheDetail(seriesId, data);
+  }, [data, seriesId]);
+
+  // 系统播放器退出、App 回前台、肃正协议合并了对端进度：进度/已看可能变了，重拉。
+  // progress-synced 在同步合并完成后才发（晚于 app-resumed），所以两个都听。
   useEffect(() => {
     let un: (() => void) | undefined;
     let cancelled = false;
     (async () => {
-      const stop = await listen<void>('app-resumed', () => { void load(); });
+      const reload = () => { void load().catch(() => {}); };
+      const stopA = await listen<void>('app-resumed', reload);
+      const stopB = await listen<number>('progress-synced', reload);
+      const stop = () => { stopA(); stopB(); };
       if (cancelled) stop(); else un = stop;
     })();
     return () => { cancelled = true; un?.(); };
   }, [load]);
 
-  const season = useMemo(
-    () => data?.seasons.find((s) => s.id === activeSeason) ?? data?.seasons[0],
-    [data, activeSeason],
-  );
+  // 视图外的改动（「看完了吗」回执标记、刮削完成）→ 就地重拉。跳过挂载时的初值
+  const dataVersion = useAppStore((s) => s.dataVersion);
+  const seenVersion = useRef(dataVersion);
+  useEffect(() => {
+    if (dataVersion === seenVersion.current) return;
+    seenVersion.current = dataVersion;
+    void load().catch(() => {});
+  }, [dataVersion, load]);
 
-  const progressPct = data && data.episode_count > 0
-    ? (data.watched_count / data.episode_count) * 100
-    : 0;
-
-  const isMovie = data?.media_type === 'movie';
-  const nextEp = data?.next_episode;
+  // ─── 派生 ─────────────────────────────────
+  const isMovie = (data?.media_type ?? initial?.media_type) === 'movie';
   const seasons = data?.seasons ?? [];
+  const season = seasons.find((s) => s.id === activeSeason) ?? seasons[0];
   const episodes = season?.episodes ?? [];
-  // 季 chips 是否渲染（电影/无季的剧集不渲染：操作行「下」直达集列表）
-  const chipsVisible = !!data && !isMovie && seasons.length > 0;
+  // 单季剧不显示季标签(「第一季」那个小标签):只有 >1 季才需要切季的标签行。
+  // 单季时整行退化成 else 分支的「剧集」标题,焦点动线也自动跳过季标签行
+  // (操作行↓直接进集列表、集列表↑直接回操作行),与电影/无季一致。
+  const chipsVisible = !isMovie && seasons.length > 1;
   const curSeasonIdx = Math.max(0, seasons.findIndex((s) => s.id === season?.id));
 
-  // ─── 焦点组 ───────────────────────────────
+  // 全剧进度与「下一集」在前端按季集顺序推导（乐观更新后立即正确，不等后端回包）
+  const progress = useMemo(() => {
+    let total = 0;
+    let watched = 0;
+    let next: { ep: Episode; seasonNo: number } | null = null;
+    for (const s of seasons) {
+      for (const e of s.episodes) {
+        total++;
+        if (e.watched) watched++;
+        else if (!next) next = { ep: e, seasonNo: s.season_number };
+      }
+    }
+    return { total, watched, next };
+  }, [seasons]);
+
+  const movieFile = isMovie ? seasons[0]?.episodes[0] : undefined;
+
+  // ─── 焦点 ─────────────────────────────────
   const actionsFocused = useFocusIndex('detail-actions');
   const seasonsFocused = useFocusIndex('detail-seasons');
   const episodesFocused = useFocusIndex('detail-episodes');
-  const [lastActionIdx, setLastActionIdx] = useState(0);
+  const lastActionIdx = useRef(0);
+  if (actionsFocused >= 0) lastActionIdx.current = actionsFocused;
 
-  useEffect(() => { if (actionsFocused >= 0) setLastActionIdx(actionsFocused); }, [actionsFocused]);
-
-  // 季 chips 焦点即预览：焦点移到哪个 chip，下方集列表实时切到该季
+  // 季标签焦点即预览
   useEffect(() => {
-    if (seasonsFocused >= 0 && seasons[seasonsFocused]) {
-      setActiveSeason(seasons[seasonsFocused].id);
-    }
+    if (seasonsFocused >= 0 && seasons[seasonsFocused]) setActiveSeason(seasons[seasonsFocused].id);
   }, [seasonsFocused, seasons]);
+
+  // 换季 / 首次拿到数据：焦点不在列表时，列表滚到「该季第一个未看集」居中；
+  // 焦点在列表里（左右键翻季）时集序号不变，行高一致下 scrollTop 仍然有效，
+  // reveal 只做兜底；同时把活动季标签居中露出——标签行的滚动只挂在 chips
+  // 焦点组的 scrollIntoView 上，从列表翻季不经过它，不滚会被裁掉
+  const hasData = data !== null;
+  useEffect(() => {
+    const list = epListRef.current;
+    if (!list) return;
+    const { stack } = useFocusStore.getState();
+    const top = stack[stack.length - 1];
+    if (top?.group === 'detail-episodes' && top.index != null) {
+      reveal(tabsRef.current, `[data-season-tab="${curSeasonIdx}"]`, 'x', true);
+      reveal(list, `[data-ep-row="${top.index}"]`, 'y');
+      return;
+    }
+    list.scrollTop = 0;
+    reveal(list, `[data-ep-row="${entryIndex(episodes)}"]`, 'y', true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [season?.id, hasData]);
 
   const enterEpisodes = useCallback(() => {
     if (episodes.length === 0) return; // 空季不进入（死组）
     useFocusStore.getState().switchTo('detail-episodes', entryIndex(episodes));
   }, [episodes]);
 
-  const playNextOrMovie = useCallback(() => {
-    if (!data) return;
-    if (nextEp) {
-      const target = data.seasons.flatMap((s) => s.episodes).find((e) => e.id === nextEp.id);
-      if (target) void playEpisode(target);
-      return;
-    }
-    const movieFile = isMovie ? data.seasons[0]?.episodes[0] : undefined;
-    if (movieFile) void playEpisode(movieFile);
-  }, [data, nextEp, isMovie]);
-
-  // 操作行（横向）：播放 → 收藏 → 元数据 → 删除。删除走确认弹窗
-  useGamepadGroup('detail-actions', {
-    count: 4,
-    cols: 4,
-    activate: (i) => {
-      if (!data) return;
-      if (i === 0) { playNextOrMovie(); return; }
-      if (i === 1) { void toggleFavorite(); return; }
-      if (i === 2) { onAutoFetch?.(toCard(data)); return; }
-      setConfirmDelete(true);
-    },
-    leave: (dir) => {
-      if (dir !== 'down') return; // 上=页面顶部（Back 退出）；左右行首行尾停住
-      if (chipsVisible) useFocusStore.getState().switchTo('detail-seasons', curSeasonIdx);
-      else enterEpisodes();
-    },
-    exit: onClose,
-  });
-
-  // 季 chips（横向）。焦点即预览（移动=切季）；OK/下 进集列表；长按 OK 整季操作
-  useGamepadGroup('detail-seasons', {
-    count: chipsVisible ? seasons.length : 0,
-    cols: chipsVisible ? seasons.length : 1,
-    activate: () => enterEpisodes(),
-    scrollIntoView: (i) => {
-      document.querySelector(`[data-season-chip="${i}"]`)
-        ?.scrollIntoView({ inline: 'nearest', block: 'nearest' });
-    },
-    leave: (dir) => {
-      if (dir === 'up') useFocusStore.getState().switchTo('detail-actions', lastActionIdx);
-      else if (dir === 'down') enterEpisodes();
-    },
-    longPress: (i) => {
-      const s = seasons[i];
-      if (s && s.episodes.length > 0) setSeasonSheet(s);
-    },
-    exit: onClose,
-  });
-
-  // 集列表（纵向，OK = 播放，长按 OK = 单集操作）。上到头回季 chips（电影回操作行）
-  useGamepadGroup('detail-episodes', {
-    count: episodes.length,
-    cols: 1,
-    activate: (i) => { const ep = episodes[i]; if (ep) void playEpisode(ep); },
-    scrollIntoView: (i) => {
-      const rows = epListRef.current?.querySelectorAll('[data-ep-row]');
-      (rows?.[i] as HTMLElement | undefined)?.scrollIntoView({ block: 'nearest' });
-    },
-    leave: (dir) => {
-      if (dir !== 'up') return; // 左右在纵列原地停住；下到底停住
-      if (chipsVisible) useFocusStore.getState().switchTo('detail-seasons', curSeasonIdx);
-      else useFocusStore.getState().switchTo('detail-actions', lastActionIdx);
-    },
-    longPress: (i) => {
-      const ep = episodes[i];
-      if (ep) setEpSheet(ep);
-    },
-    exit: onClose,
-  });
-
-  // 打开详情 → 焦点先落在操作行的播放键（最常用的动作）
-  useEffect(() => {
-    useFocusStore.getState().push('detail-actions', 0);
-    return () => {
-      const s = useFocusStore.getState();
-      const top = s.stack.length ? s.stack[s.stack.length - 1] : undefined;
-      if ((DETAIL_GROUPS as readonly string[]).includes(top?.group ?? '')) s.back();
-    };
-  }, []);
-
-  // 切季/重刮后列表变短时，栈里的焦点索引可能越界（第 24 集的季 → 第 6 集的季，
-  // 焦点停在 23：整屏无高亮）。把越界焦点收到最后一项
-  useEffect(() => {
-    const s = useFocusStore.getState();
-    const top = s.stack[s.stack.length - 1];
-    if (top?.group === 'detail-episodes' && top.index != null && top.index >= episodes.length) {
-      s.switchTo('detail-episodes', Math.max(0, episodes.length - 1));
-    }
-    if (top?.group === 'detail-seasons' && top.index != null && top.index >= seasons.length) {
-      s.switchTo('detail-seasons', Math.max(0, seasons.length - 1));
-    }
-  }, [episodes.length, seasons.length]);
-
-  const playEpisode = async (ep: Episode) => {
+  // ─── 操作 ─────────────────────────────────
+  const playEpisode = useCallback(async (ep: Episode) => {
     if (!ep.local_path) {
       void message(t('series.epNoFileThis'), { title: t('series.cannotPlay'), kind: 'warning' });
       return;
@@ -309,29 +353,28 @@ export default function SeriesDetail({ seriesId, onClose, onChanged, onAutoFetch
     } catch (err) {
       void message(t('series.playFailed', { msg: String(err) }), { title: t('common.error'), kind: 'error' });
     }
-  };
+  }, [t, onChanged]);
 
-  const markEpisode = async (ep: Episode, watched: boolean) => {
+  const setWatched = useCallback(async (ids: string[], watched: boolean) => {
+    if (ids.length === 0 || !data) return;
+    const before = data;
+    const hit = new Set(ids);
+    setData({
+      ...data,
+      seasons: data.seasons.map((s) => (s.episodes.some((e) => hit.has(e.id))
+        ? { ...s, episodes: s.episodes.map((e) => (hit.has(e.id) ? { ...e, watched, watched_ms: 0 } : e)) }
+        : s)),
+    });
     try {
-      await api.markEpisodeWatched(ep.id, watched);
-      await load();
+      await api.markEpisodesWatched(ids, watched);
       onChanged?.();
     } catch (err) {
+      setData(before);
       void message(t('series.markFailed', { msg: String(err) }), { title: t('common.error'), kind: 'error' });
     }
-  };
+  }, [data, onChanged, t]);
 
-  const setSeasonWatchedById = async (seasonId: string, watched: boolean) => {
-    try {
-      await api.markSeasonWatched(seasonId, watched);
-      await load();
-      onChanged?.();
-    } catch (err) {
-      void message(t('series.opFailed', { msg: String(err) }), { title: t('common.error'), kind: 'error' });
-    }
-  };
-
-  const toggleFavorite = async () => {
+  const toggleFavorite = useCallback(async () => {
     if (!data) return;
     const next = !data.favorite;
     setData({ ...data, favorite: next });
@@ -342,194 +385,275 @@ export default function SeriesDetail({ seriesId, onClose, onChanged, onAutoFetch
       setData({ ...data, favorite: !next });
       void message(t('series.favoriteFailed', { msg: String(err) }), { title: t('common.error'), kind: 'error' });
     }
-  };
+  }, [data, onChanged, t]);
 
-  if (loading || !data) {
-    return (
-      <div className="h-full flex items-center justify-center gap-3 text-text-secondary">
-        <Loader2 size={20} className="animate-spin text-[#00d4ff]" />
-        {t('series.loading')}
-      </div>
-    );
-  }
+  // 主按钮：电影 → 播放影片；剧集 → 下一集；全看完 → 从第一集重看
+  const primary = useMemo(() => {
+    if (isMovie) {
+      const left = movieFile ? remainingMin(movieFile) : 0;
+      return {
+        target: movieFile ?? null,
+        label: t('series.playMovie'),
+        sub: left ? t('series.remainingMin', { n: left }) : '',
+        pct: movieFile && !movieFile.watched ? watchPercent(movieFile.watched_ms, movieFile.runtime_minutes) : 0,
+        rewatch: false,
+      };
+    }
+    const { next, watched, total } = progress;
+    if (next) {
+      const left = remainingMin(next.ep);
+      return {
+        target: next.ep,
+        label: watched > 0 || left ? t('series.continueWatching') : t('series.startWatching'),
+        sub: seLabel(next.seasonNo, next.ep.episode_number) + (left ? ` · ${t('series.remainingMin', { n: left })}` : ''),
+        pct: watchPercent(next.ep.watched_ms, next.ep.runtime_minutes),
+        rewatch: false,
+      };
+    }
+    const first = seasons.find((s) => s.episodes.length > 0);
+    return {
+      target: first?.episodes[0] ?? null,
+      label: total > 0 ? t('series.rewatch') : t('series.play'),
+      sub: first ? seLabel(first.season_number, first.episodes[0].episode_number) : '',
+      pct: 0,
+      rewatch: total > 0,
+    };
+  }, [isMovie, movieFile, progress, seasons, t]);
 
-  const backdrop = data.bg_path || data.poster_path;
-  const year = yearOf(data.first_air_date);
-  const movieFile = isMovie ? data.seasons[0]?.episodes[0] : undefined;
-  const metaBits = (isMovie
-    ? [t('series.movie'), year, data.status, data.genres, formatRuntime(movieFile?.runtime_minutes ?? 0)]
-    : [year, data.status, data.genres,
-       data.seasons.length > 0 ? t('series.seasonCount', { n: data.seasons.length }) : '',
-       data.episode_count > 0 ? t('series.episodeCount', { n: data.episode_count }) : '']
-  )
-    .concat(data.total_seconds > 0 ? [t('series.watchedTotal', { time: formatDuration(data.total_seconds) })] : [])
-    .filter(Boolean);
+  // ─── 焦点组 ───────────────────────────────
+  // 操作行（横向）：播放 → 收藏 → 元数据 → 删除
+  useGamepadGroup('detail-actions', {
+    count: 4,
+    cols: 4,
+    activate: (i) => {
+      if (!data) return;
+      if (i === 0) { if (primary.target) void playEpisode(primary.target); return; }
+      if (i === 1) { void toggleFavorite(); return; }
+      if (i === 2) { onAutoFetch?.(toCard(data)); return; }
+      setConfirmDelete(true);
+    },
+    leave: (dir) => {
+      if (dir !== 'down' || !data) return;
+      if (chipsVisible) useFocusStore.getState().switchTo('detail-seasons', curSeasonIdx);
+      else enterEpisodes();
+    },
+    exit: onClose,
+  });
 
-  // 播放键文案
-  const playLabel = isMovie
-    ? t('series.playMovie')
-    : nextEp
-      ? (data.watched_count > 0 ? t('series.continueWatching') : t('series.startWatching'))
-      : (data.episode_count > 0 ? t('series.allWatched') : '');
-  const playSub = !isMovie && nextEp
-    ? `S${String(nextEp.season_number).padStart(2, '0')}E${String(nextEp.episode_number).padStart(2, '0')}`
+  // 季标签（横向）：移动即切季；OK/下 进集列表；长按 OK 整季操作
+  useGamepadGroup('detail-seasons', {
+    count: chipsVisible ? seasons.length : 0,
+    cols: chipsVisible ? seasons.length : 1,
+    activate: () => enterEpisodes(),
+    scrollIntoView: (i) => reveal(tabsRef.current, `[data-season-tab="${i}"]`, 'x'),
+    leave: (dir) => {
+      if (dir === 'up') useFocusStore.getState().switchTo('detail-actions', lastActionIdx.current);
+      else if (dir === 'down') enterEpisodes();
+    },
+    longPress: (i) => {
+      const s = seasons[i];
+      if (s && s.episodes.length > 0) setSeasonSheet(s);
+    },
+    exit: onClose,
+  });
+
+  // 集列表（纵向）：OK 播放，长按 OK 单集操作；上到头回季标签（电影回操作行）；
+  // 左右不移动行，直接翻上/下一季：焦点留在列表、同集序号续走
+  useGamepadGroup('detail-episodes', {
+    count: episodes.length,
+    cols: 1,
+    activate: (i) => { const ep = episodes[i]; if (ep) void playEpisode(ep); },
+    scrollIntoView: (i) => reveal(epListRef.current, `[data-ep-row="${i}"]`, 'y'),
+    horizontal: (dir) => {
+      if (!chipsVisible) return false; // 电影/无季：左右无意义，原地停住
+      const step = dir === 'left' ? -1 : 1;
+      let j = curSeasonIdx + step;
+      while (j >= 0 && j < seasons.length && seasons[j].episodes.length === 0) j += step; // 空季跳过
+      if (j < 0 || j >= seasons.length) return false; // 首尾季：停住
+      const cur = Math.max(0, episodesFocused);
+      const idx = Math.min(cur, seasons[j].episodes.length - 1); // 目标季更短：焦点收尾，避免一帧无高亮
+      if (idx !== cur) useFocusStore.getState().switchTo('detail-episodes', idx);
+      setActiveSeason(seasons[j].id);
+      return true;
+    },
+    leave: (dir) => {
+      if (dir !== 'up') return; // 下到底停住
+      if (chipsVisible) useFocusStore.getState().switchTo('detail-seasons', curSeasonIdx);
+      else useFocusStore.getState().switchTo('detail-actions', lastActionIdx.current);
+    },
+    longPress: (i) => { const ep = episodes[i]; if (ep) setEpSheet(ep); },
+    exit: onClose,
+  });
+
+  // 打开 → 焦点落在播放键；卸载时若栈顶还是详情的组就弹掉
+  useEffect(() => {
+    useFocusStore.getState().push('detail-actions', 0);
+    return () => {
+      const s = useFocusStore.getState();
+      const top = s.stack.length ? s.stack[s.stack.length - 1] : undefined;
+      if ((DETAIL_GROUPS as readonly string[]).includes(top?.group ?? '')) s.back();
+    };
+  }, []);
+
+  // 切季/重刮后列表变短：越界焦点收到最后一项（否则整屏无高亮）
+  useEffect(() => {
+    const s = useFocusStore.getState();
+    const top = s.stack[s.stack.length - 1];
+    if (top?.group === 'detail-episodes' && top.index != null && top.index >= episodes.length) {
+      if (episodes.length > 0) s.switchTo('detail-episodes', episodes.length - 1);
+      else s.switchTo(chipsVisible ? 'detail-seasons' : 'detail-actions', chipsVisible ? curSeasonIdx : 0);
+    }
+    if (top?.group === 'detail-seasons' && top.index != null && top.index >= seasons.length) {
+      s.switchTo('detail-seasons', Math.max(0, seasons.length - 1));
+    }
+  }, [episodes.length, seasons.length, chipsVisible, curSeasonIdx]);
+
+  // ─── 渲染 ─────────────────────────────────
+  const info = data ?? initial;
+  const version = info?.updated_at ?? '';
+
+  // 背景图由全局共享层（StageBackdrop）承担：打开详情时它已经是 Hero 那张、已解码，
+  // 原地展开即可。详情自身不再画背景、也不等背景解码，整页立即入场（更快）。
+  useLayoutEffect(() => {
+    onReadyChange?.(true);
+  }, [onReadyChange]);
+
+  const metaBits = info
+    ? (isMovie
+      ? [t('series.movie'), yearOf(info.first_air_date), info.status, info.genres, formatRuntime(movieFile?.runtime_minutes ?? 0)]
+      : [yearOf(info.first_air_date), info.status, info.genres,
+        (data ? seasons.length : initial?.season_count ?? 0) > 0
+          ? t('series.seasonCount', { n: data ? seasons.length : initial?.season_count ?? 0 }) : '',
+        (data ? progress.total : initial?.episode_count ?? 0) > 0
+          ? t('series.episodeCount', { n: data ? progress.total : initial?.episode_count ?? 0 }) : '']
+    ).concat(info.total_seconds > 0 ? [t('series.watchedTotal', { time: formatDuration(info.total_seconds) })] : [])
+      .filter(Boolean)
+    : [];
+
+  const focusedEp = episodesFocused >= 0 ? episodes[episodesFocused] : undefined;
+  // 预览（文字+剧照）即时跟随焦点，不做停稳延迟
+  const previewEp = focusedEp ?? episodes[entryIndex(episodes)];
+  const previewSeason = previewEp
+    ? seasons.find((s) => s.id === previewEp.season_id) ?? season
+    : season;
+  const previewKicker = previewEp && previewSeason
+    ? (focusedEp
+      ? `${seasonName(previewSeason)} · ${t('common.episodeN', { n: previewEp.episode_number })}`
+      : `${t('series.upNext')} · ${seLabel(previewSeason.season_number, previewEp.episode_number)}`)
     : '';
 
-  const epSheetSe = epSheet
-    ? `S${String(seasons.find((s) => s.id === epSheet.season_id)?.season_number ?? 1).padStart(2, '0')}E${String(epSheet.episode_number).padStart(2, '0')}`
-    : '';
+  // 预取焦点邻集剧照（w342 小图，本地协议秒回）：解码进共享缓存，连按扫列表时
+  // 落点的节点多半已就绪，EpisodePreview 直接复用已解码节点，近似瞬时切换
+  useEffect(() => {
+    const base = episodesFocused >= 0 ? episodesFocused : entryIndex(episodes);
+    for (const j of [base - 1, base + 1, base + 2]) {
+      const ep = episodes[j];
+      if (ep?.still_path) warmStill(coverSrc(ep.still_path, version));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [episodesFocused, episodes, version]);
+
+  const overallPct = progress.total > 0 ? (progress.watched / progress.total) * 100 : 0;
+  const title = info?.title ?? '';
 
   return (
-    <div className="detail2-root">
-      {/* 背景图：fixed 覆盖整块画布（画布方案下 fixed 相对 #root），单张、无动画重复 */}
-      {backdrop ? (
-        <div className="detail2-backdrop">
-          <img src={coverSrc(backdrop, data.updated_at)} alt="" />
-          <div className="detail2-backdrop-fade" />
-        </div>
-      ) : (
-        <div className="detail2-backdrop detail2-backdrop-fallback" />
-      )}
+    <>
+    <div className="dt-root">
+      {/* 背景由全局 StageBackdrop 提供（与主页 Hero 同一张图，已解码），这里只压暗托文字 */}
+      <div className="dt-shade" />
 
-      <div className="detail2-grid">
-        {/* ─── 左栏：海报 + 总进度（纯展示，不聚焦） ─── */}
-        <div className="detail2-left">
-          <div className="detail2-poster-wrap">
-            {data.poster_path ? (
-              <img src={coverSrc(data.poster_path, data.updated_at)} alt={data.title} className="detail2-poster" />
-            ) : (
-              <div className="detail2-poster detail2-poster-fallback">
-                <Film size={44} className="text-text-tertiary" />
-              </div>
+      <div className="dt-layout">
+        {/* ── 头部：标题 / 元信息 / 简介 / 操作 ── */}
+        <header className="dt-head">
+          <h1 className="dt-title">{title}</h1>
+          {info?.aliases && info.aliases !== title && <p className="dt-aliases">{info.aliases}</p>}
+          <div className="dt-meta">
+            {info && info.vote_average > 0 && (
+              <span className="rating-badge"><Star size={13} fill="currentColor" />{info.vote_average.toFixed(1)}</span>
             )}
+            {metaBits.map((bit, i) => <span key={i} className="dt-meta-item">{bit}</span>)}
           </div>
+          <p className={clsx('dt-overview', !info?.overview && 'empty')}>
+            {info?.overview || t('series.noOverview')}
+          </p>
 
-          {!isMovie && data.episode_count > 0 && (
-            <div className="detail2-progress-block">
-              <div className="detail2-progress-bar">
-                <div className="detail2-progress-fill" style={{ width: `${progressPct}%` }} />
-              </div>
-              <span className="detail2-progress-text tabular-nums">
-                {t('series.watchedCount', { watched: data.watched_count, total: data.episode_count })}
-              </span>
-            </div>
-          )}
-        </div>
-
-        {/* ─── 右栏：标题区 → 操作行 → 季 chips → 集列表（单纵列动线） ─── */}
-        <div className="detail2-right">
-          <div className="detail2-head">
-            <h1 className="detail2-title">{data.title}</h1>
-            {data.aliases && data.aliases !== data.title && (
-              <p className="detail2-aliases">{data.aliases}</p>
-            )}
-            <div className="detail2-meta">
-              {data.vote_average > 0 && (
-                <span className="rating-badge">
-                  <Star size={14} fill="currentColor" />
-                  {data.vote_average.toFixed(1)}
-                </span>
-              )}
-              {metaBits.map((bit, i) => (
-                <span key={i} className="detail2-meta-item">{bit}</span>
-              ))}
-            </div>
-            {data.overview ? (
-              <p className="detail2-overview">{data.overview}</p>
-            ) : (
-              <p className="detail2-overview detail2-overview-empty">{t('series.noOverview')}</p>
-            )}
-          </div>
-
-          {/* 操作行：播放 → 收藏 → 元数据 → 删除（删除弹确认） */}
-          <div className="detail2-actions">
+          <div className="dt-actions">
             <button
-              onClick={playNextOrMovie}
-              className={clsx('detail2-btn primary', actionsFocused === 0 && 'gamepad-focus')}
+              onClick={() => { if (primary.target) void playEpisode(primary.target); }}
+              className={clsx('dt-btn primary', !primary.target && 'idle', actionsFocused === 0 && 'gamepad-focus')}
             >
-              {playLabel === t('series.allWatched')
-                ? <CheckCheck size={17} className="text-green-400" />
-                : <Play size={17} fill="currentColor" />}
-              <span className="truncate">{playLabel}</span>
-              {playSub && <span className="detail2-btn-sub tabular-nums">{playSub}</span>}
+              {primary.rewatch ? <RotateCcw size={18} /> : <Play size={18} fill="currentColor" />}
+              <span className="dt-btn-label">{primary.label}</span>
+              {primary.sub && <span className="dt-btn-sub tabular-nums">{primary.sub}</span>}
+              {primary.pct > 0 && <span className="dt-btn-progress"><i style={{ width: `${primary.pct}%` }} /></span>}
             </button>
-
             <button
               onClick={() => void toggleFavorite()}
-              className={clsx('detail2-btn', data.favorite && 'fav-on', actionsFocused === 1 && 'gamepad-focus')}
+              className={clsx('dt-btn', data?.favorite && 'fav-on', actionsFocused === 1 && 'gamepad-focus')}
             >
-              <Star size={16} className={data.favorite ? 'text-[#ffd75e]' : ''} fill={data.favorite ? 'currentColor' : 'none'} />
-              {data.favorite ? t('series.favorited') : t('series.favorite')}
+              <Star size={17} fill={data?.favorite ? 'currentColor' : 'none'} />
+              {data?.favorite ? t('series.favorited') : t('series.favorite')}
             </button>
-
             <button
-              onClick={() => onAutoFetch?.(toCard(data))}
-              className={clsx('detail2-btn', actionsFocused === 2 && 'gamepad-focus')}
+              onClick={() => { if (data) onAutoFetch?.(toCard(data)); }}
+              className={clsx('dt-btn', actionsFocused === 2 && 'gamepad-focus')}
             >
-              <Sparkles size={16} />
+              <Sparkles size={17} />
               {t('series.fetchMeta')}
             </button>
-
             <button
               onClick={() => setConfirmDelete(true)}
-              className={clsx('detail2-btn danger', actionsFocused === 3 && 'gamepad-focus')}
+              className={clsx('dt-btn danger', actionsFocused === 3 && 'gamepad-focus')}
             >
-              <Trash2 size={16} />
+              <Trash2 size={17} />
               {t('series.deleteSeries')}
             </button>
           </div>
+        </header>
 
-          {/* 季 chips（焦点即预览；电影不渲染） */}
-          {chipsVisible && (
-            <div className="detail2-chips">
-              <div className="detail2-chips-scroll">
+        {/* ── 下半：季标签 + 集列表 + 预览 ── */}
+        <section className="dt-lower">
+          <div className={clsx('dt-lower-head', !isMovie && !chipsVisible && 'bare')}>
+            {chipsVisible ? (
+              <div ref={tabsRef} className="dt-tabs">
                 {seasons.map((s, i) => (
-                  <SeasonChip
+                  <SeasonTab
                     key={s.id}
                     season={s}
                     index={i}
-                    active={s.id === (season?.id ?? '')}
+                    active={s.id === season?.id && seasonsFocused < 0}
                     focused={seasonsFocused === i}
                     onPick={setActiveSeason}
                   />
                 ))}
               </div>
-            </div>
-          )}
+            ) : isMovie ? (
+              <h2 className="dt-lower-title">{t('series.movie')}</h2>
+            ) : null}
+            {!isMovie && progress.total > 0 && (
+              <div className="dt-overall">
+                <span className="dt-overall-bar"><i style={{ width: `${overallPct}%` }} /></span>
+                <span className="tabular-nums">
+                  {t('series.watchedCount', { watched: progress.watched, total: progress.total })}
+                </span>
+              </div>
+            )}
+            <span className="dt-hint">
+              {t(!isMovie && seasons.length > 1 ? 'series.hintEpsKeys' : 'series.hintMovieKeys')}
+            </span>
+          </div>
 
-          {/* 集列表 */}
-          <div className="detail2-eps">
-            <div className="detail2-panel-head">
-              <h2 className="detail2-panel-title">
-                {isMovie
-                  ? t('series.movie')
-                  : (season?.name?.trim() || (season ? t('series.seasonN', { n: season.season_number }) : ''))}
-              </h2>
-              <span className="detail2-hint">{t('series.hintEpsKeys')}</span>
-              {season && episodes.length > 0 && !isMovie && (
-                <div className="detail2-panel-tools">
-                  <button
-                    onClick={() => void setSeasonWatchedById(season.id, true)}
-                    className="detail2-tool"
-                  >
-                    <CheckCheck size={13} />
-                    {t('series.markSeasonWatched')}
-                  </button>
-                  <button
-                    onClick={() => void setSeasonWatchedById(season.id, false)}
-                    className="detail2-tool"
-                  >
-                    <RotateCcw size={13} />
-                    {t('series.resetSeason')}
-                  </button>
+          <div className={clsx('dt-browse', (isMovie || !previewEp) && 'solo')}>
+            <div ref={epListRef} className="dt-eps">
+              {!data ? (
+                <div className="dt-empty">
+                  <Loader2 size={22} className="animate-spin text-[#00d4ff]" />
+                  {t('series.loading')}
                 </div>
-              )}
-            </div>
-            <div ref={epListRef} className="detail2-eps-scroll">
-              {episodes.length === 0 ? (
-                <div className="detail2-eps-empty">
+              ) : episodes.length === 0 ? (
+                <div className="dt-empty">
                   <Film size={34} className="text-text-tertiary" />
-                  <p>{isMovie ? t('series.noEpMovie') : t('series.noEpSeason')}</p>
+                  {isMovie ? t('series.noEpMovie') : t('series.noEpSeason')}
                 </div>
               ) : (
                 episodes.map((ep, i) => (
@@ -537,85 +661,95 @@ export default function SeriesDetail({ seriesId, onClose, onChanged, onAutoFetch
                     key={ep.id}
                     ep={ep}
                     index={i}
-                    isMovie={!!isMovie}
-                    seriesTitle={data.title}
+                    title={episodeTitle(ep, isMovie, title)}
+                    sub={isMovie
+                      ? fileNameOf(ep.local_path) || t('series.epNoLocalFile')
+                      : [ep.air_date ? ep.air_date.slice(0, 10) : '', ep.local_path ? '' : t('series.epNoLocalFile')]
+                        .filter(Boolean).join(' · ')}
                     focused={episodesFocused === i}
                     onPlay={playEpisode}
                   />
                 ))
               )}
             </div>
+
+            {!isMovie && previewEp && previewSeason && (
+              <EpisodePreview
+                ep={previewEp}
+                seasonNo={previewSeason.season_number}
+                kicker={previewKicker}
+                title={episodeTitle(previewEp, false, title)}
+                version={version}
+              />
+            )}
           </div>
-        </div>
+        </section>
       </div>
 
-      {/* 长按 OK：单集操作表 */}
       {epSheet && (
         <ActionSheet
           title={t('series.epActionsTitle')}
-          subtitle={`${epSheetSe} · ${cleanEpisodeTitle(epSheet.title, epSheet.episode_number)}`}
-          items={[
-            {
-              icon: Play,
-              label: t('series.playEp', { se: epSheetSe }),
-              onSelect: () => void playEpisode(epSheet),
-            },
-            epSheet.watched
-              ? {
-                  icon: RotateCcw,
-                  label: t('series.markUnwatched'),
-                  onSelect: () => void markEpisode(epSheet, false),
-                }
-              : {
-                  icon: Check,
-                  label: t('series.markWatched'),
-                  onSelect: () => void markEpisode(epSheet, true),
-                },
-          ]}
+          subtitle={`${seLabel(seasons.find((s) => s.id === epSheet.season_id)?.season_number ?? 1, epSheet.episode_number)} · ${episodeTitle(epSheet, isMovie, title)}`}
+          items={episodeSheetItems(epSheet, seasons, playEpisode, setWatched)}
           onClose={() => setEpSheet(null)}
         />
       )}
 
-      {/* 长按 OK：整季操作表 */}
       {seasonSheet && (
         <ActionSheet
           title={t('series.seasonActionsTitle')}
-          subtitle={seasonSheet.name?.trim() || t('series.seasonN', { n: seasonSheet.season_number })}
+          subtitle={seasonName(seasonSheet)}
           items={[
             {
               icon: CheckCheck,
               label: t('series.markSeasonWatched'),
-              onSelect: () => void setSeasonWatchedById(seasonSheet.id, true),
+              onSelect: () => void setWatched(seasonSheet.episodes.filter((e) => !e.watched).map((e) => e.id), true),
             },
             {
               icon: RotateCcw,
               label: t('series.resetSeason'),
-              onSelect: () => void setSeasonWatchedById(seasonSheet.id, false),
+              onSelect: () => void setWatched(seasonSheet.episodes.filter((e) => e.watched || e.watched_ms > 0).map((e) => e.id), false),
             },
           ]}
           onClose={() => setSeasonSheet(null)}
         />
       )}
 
-      {/* 删除确认（默认焦点在「取消」） */}
-      {confirmDelete && (
+      {confirmDelete && data && (
         <ActionSheet
           title={t('series.deleteSeries')}
           subtitle={t('series.deleteConfirm', { title: data.title })}
           items={[
             { icon: X, label: t('common.cancel'), onSelect: () => {} },
-            {
-              icon: Trash2,
-              label: t('common.delete'),
-              danger: true,
-              onSelect: () => onDelete?.(toCard(data)),
-            },
+            { icon: Trash2, label: t('common.delete'), danger: true, onSelect: () => onDelete?.(toCard(data)) },
           ]}
           onClose={() => setConfirmDelete(false)}
         />
       )}
     </div>
+    </>
   );
+}
+
+/** 单集操作表：播放 / 标记切换 / 标记此集及之前（本季前面还有没看的才出现） */
+function episodeSheetItems(
+  ep: Episode,
+  seasons: SeasonWithEpisodes[],
+  play: (ep: Episode) => void,
+  setWatched: (ids: string[], watched: boolean) => void,
+): ActionSheetItem[] {
+  const items: ActionSheetItem[] = [];
+  if (ep.local_path) items.push({ icon: Play, label: tr('series.play'), onSelect: () => play(ep) });
+  items.push(ep.watched
+    ? { icon: RotateCcw, label: tr('series.markUnwatched'), onSelect: () => setWatched([ep.id], false) }
+    : { icon: Check, label: tr('series.markWatched'), onSelect: () => setWatched([ep.id], true) });
+  const eps = seasons.find((s) => s.id === ep.season_id)?.episodes ?? [];
+  const idx = eps.findIndex((e) => e.id === ep.id);
+  const upTo = idx >= 0 ? eps.slice(0, idx + 1).filter((e) => !e.watched).map((e) => e.id) : [];
+  if (upTo.some((id) => id !== ep.id)) {
+    items.push({ icon: ListChecks, label: tr('series.markUpToHere'), onSelect: () => setWatched(upTo, true) });
+  }
+  return items;
 }
 
 /** 详情 data → SeriesCard（元数据/删除回调的入参形状） */

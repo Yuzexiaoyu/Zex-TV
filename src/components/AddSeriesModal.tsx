@@ -4,7 +4,7 @@
 // 剧集文件夹放在共享根目录，所以 folder 步不提供「进入子目录」——点一下就是添加它。
 
 import { useEffect, useState } from 'react';
-import { Plus, X, Server, Folder, Loader2, Sparkles, Check } from 'lucide-react';
+import { Plus, X, Server, Folder, Loader2 } from 'lucide-react';
 import { clsx } from 'clsx';
 import * as api from '../api';
 import type { SmbServer, SmbShareInfo, SmbDirEntry } from '../types';
@@ -18,8 +18,8 @@ interface Props {
 
 type Step = 'nas' | 'share' | 'folder';
 
-/** 添加进度：扫描 → 刮削 →（关闭）。null = 空闲 */
-type Progress = { title: string; phase: 'adding' | 'fetching' } | null;
+/** 添加进度（仅入库；刮削已移到详情页「获取元数据」手动触发）。null = 空闲 */
+type Progress = { title: string } | null;
 
 export default function AddSeriesModal({ onClose, onSuccess }: Props) {
   const t = useT();
@@ -32,8 +32,6 @@ export default function AddSeriesModal({ onClose, onSuccess }: Props) {
   const [busy, setBusy] = useState(false);
   const [progress, setProgress] = useState<Progress>(null);
   const [error, setError] = useState<string | null>(null);
-  // 本次会话已成功添加的文件夹名：连续添加多部时给已加过的打勾
-  const [added, setAdded] = useState<string[]>([]);
 
   useEffect(() => {
     void api.getSmbServers().then(setServers).catch(() => {});
@@ -112,14 +110,15 @@ export default function AddSeriesModal({ onClose, onSuccess }: Props) {
     }
   };
 
-  // 点文件夹 = 扫描 + 建库 + 刮削，一气做完。
-  // 不关弹窗：连续加好几部时留在列表上继续点，加过的行显示对勾
+  // 点文件夹 = 扫描 + 建库，一步入库即完成。不主动刮削——刮削改到详情页
+  // 「获取元数据」手动触发，进度走底部迷你浮层（不挡操作，见 SeriesView）。
+  // 添加成功即关窗回影视库（失败则留在弹窗显示错误、可重试）。
   const addFolder = async (folder: string) => {
     setBusy(true);
     setError(null);
-    setProgress({ title: folder, phase: 'adding' });
+    setProgress({ title: folder });
     try {
-      const series = await api.addSeriesBySmb({
+      await api.addSeriesBySmb({
         serverId,
         share,
         path: folder,
@@ -127,16 +126,7 @@ export default function AddSeriesModal({ onClose, onSuccess }: Props) {
         mediaType: 'auto', // 后端按视频文件数判定电影/剧集
       });
       onSuccess?.();
-
-      // 紧接着刮削：拿 TMDB 的正式名/海报/简介覆盖文件夹名
-      setProgress({ title: series.title, phase: 'fetching' });
-      try {
-        await api.autoFetchSeriesMetadata(series.id);
-        onSuccess?.();
-      } catch {
-        /* 刮削失败不算添加失败：剧已入库，用户可在详情页手动重试 */
-      }
-      setAdded((prev) => [...prev, folder]);
+      onClose(); // 添加完成 → 直接回主页，不保留窗口
     } catch (err) {
       setError(t('add.failed', { msg: String(err) }));
     } finally {
@@ -153,7 +143,7 @@ export default function AddSeriesModal({ onClose, onSuccess }: Props) {
 
   return (
     <div className="fixed inset-0 z-[200] flex items-center justify-center p-8" onClick={() => { if (!busy) onClose(); }}>
-      <div className="absolute inset-0 bg-black/75 backdrop-blur-md animate-fade-in" />
+      <div className="absolute inset-0 bg-black/80 animate-fade-in" />
       <div
         className="relative w-full max-w-2xl max-h-full flex flex-col glass-modal shadow-2xl animate-scale-in overflow-hidden"
         onClick={(e) => e.stopPropagation()}
@@ -217,47 +207,30 @@ export default function AddSeriesModal({ onClose, onSuccess }: Props) {
             entries.length === 0 ? (
               <div className="py-8 text-center text-base text-text-secondary">{t('add.noFolders')}</div>
             ) : (
-              entries.map((e, i) => {
-                const done = added.includes(e.name);
-                return (
-                  <button
-                    key={e.name}
-                    data-add-row={i}
-                    onClick={() => void addFolder(e.name)}
-                    disabled={busy}
-                    className={clsx('add-pick-row', focused === i && 'gamepad-focus')}
-                  >
-                    <Folder size={20} className="text-[#a855f7]" />
-                    <span className="flex-1 text-left text-base truncate">{e.name}</span>
-                    {done ? (
-                      <span className="flex items-center gap-1.5 text-sm text-green-400 shrink-0">
-                        <Check size={16} />{t('add.done')}
-                      </span>
-                    ) : (
-                      <Plus size={18} className="text-text-tertiary shrink-0" />
-                    )}
-                  </button>
-                );
-              })
+              entries.map((e, i) => (
+                <button
+                  key={e.name}
+                  data-add-row={i}
+                  onClick={() => void addFolder(e.name)}
+                  disabled={busy}
+                  className={clsx('add-pick-row', focused === i && 'gamepad-focus')}
+                >
+                  <Folder size={20} className="text-[#a855f7]" />
+                  <span className="flex-1 text-left text-base truncate">{e.name}</span>
+                  <Plus size={18} className="text-text-tertiary shrink-0" />
+                </button>
+              ))
             )
           )}
 
           {error && <p className="text-sm text-red-400">{error}</p>}
         </div>
 
-        {/* 进度条：扫描/刮削期间盖在底部，明确告诉用户在忙什么（电视上没有鼠标指针转圈） */}
+        {/* 进度条：扫描入库期间盖在底部，明确告诉用户在忙什么（电视上没有鼠标指针转圈） */}
         {progress && (
           <div className="px-7 py-5 border-t border-border-glass flex items-center gap-3 shrink-0">
-            {progress.phase === 'adding' ? (
-              <Loader2 size={18} className="animate-spin text-[#00d4ff] shrink-0" />
-            ) : (
-              <Sparkles size={18} className="text-[#00d4ff] shrink-0 animate-pulse" />
-            )}
-            <span className="text-base truncate">
-              {progress.phase === 'adding'
-                ? t('add.scanningFolder', { title: progress.title })
-                : t('add.fetchingFolder', { title: progress.title })}
-            </span>
+            <Loader2 size={18} className="animate-spin text-[#00d4ff] shrink-0" />
+            <span className="text-base truncate">{t('add.scanningFolder', { title: progress.title })}</span>
           </div>
         )}
       </div>

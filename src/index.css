@@ -46,15 +46,15 @@
    现在改成固定设计画布 + 等比缩放铺满：#root 宽固定 1920（设计基准），高按
    缩放比反算实际视口高，scale 后正好铺满、不留黑边也不裁切。元素看起来多大只由
    画布宽度决定，与设备像素密度无关；要整体调大/调小只改 main.tsx 的 DESIGN_W。
-
-   transform 会成为后代 fixed 元素的包含块，所以那 6 处 `fixed inset-0` 遮罩正好
-   覆盖整块画布、不会错位。但 vh/vw 仍按物理视口算，画布内一律不用 vh/vw
-   （原有 max-h-[88vh] / max-w-[70vw] 已改成百分比）。 */
+   缩放用 `zoom` 而非 `transform: scale`：本机是很弱的 MStar SoC + dpr 2，transform
+   会把设计画布按 宽×dpr（≈3200px）栅格化再 GPU 缩小，弱 GPU 每逢重绘就掉成低清
+   （焦点移动时封面「先糊后清」）；zoom 直接按最终真实分辨率栅格化，无此问题。
+   真机实测 `fixed inset-0` 遮罩在 zoom 下仍铺满全屏、不错位。vh/vw 仍按物理视口算，
+   画布内一律不用 vh/vw（原有 max-h-[88vh] / max-w-[70vw] 已改成百分比）。 */
 #root {
   width: var(--tv-w, 100%);
   height: var(--tv-h, 100%);
-  transform: scale(var(--tv-scale, 1));
-  transform-origin: top left;
+  zoom: var(--tv-scale, 1); /* 见上：用 zoom 而非 transform:scale，避免弱 GPU 过度栅格化导致封面「先糊后清」 */
   overflow: hidden;
 }
 
@@ -84,45 +84,30 @@ body {
     radial-gradient(ellipse 60% 50% at 20% 20%, rgba(0, 100, 180, 0.12) 0%, transparent 70%),
     radial-gradient(ellipse 50% 60% at 80% 80%, rgba(100, 0, 180, 0.08) 0%, transparent 70%),
     radial-gradient(ellipse 40% 40% at 50% 50%, rgba(0, 60, 120, 0.06) 0%, transparent 70%);
-  animation: ambient-drift 20s ease-in-out infinite;
 }
 
-@keyframes ambient-drift {
-  0%, 100% { opacity: 1; transform: scale(1); }
-  50% { opacity: 0.7; transform: scale(1.05); }
-}
-
-/* ─── Glass Morphism ───────────────────────── */
+/* ─── 面板底色 ─────────────────────────────────
+   电视 GPU 弱：backdrop-filter 每帧要对背后内容重新采样+模糊，全屏遮罩、
+   滚动区上的毛玻璃是卡顿主因。这里一律换成近不透明实色，深底上视觉几乎无差 */
 .glass {
-  background: var(--color-bg-surface);
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
+  background: rgba(14, 15, 26, 0.92);
   border: 1px solid var(--color-border-glass);
-  transition: background 0.3s, border-color 0.3s;
 }
 
 .glass-card {
   background: rgba(13, 15, 28, 0.97);
-  backdrop-filter: blur(16px);
-  -webkit-backdrop-filter: blur(16px);
   border: 1px solid var(--color-border-glass-hover);
   border-radius: 16px;
-  transition: box-shadow 0.3s, transform 0.3s, background 0.3s;
 }
 
 .glass-modal {
-  background: rgba(10, 10, 20, 0.94);
-  backdrop-filter: blur(24px);
-  -webkit-backdrop-filter: blur(24px);
-  border: 1px solid var(--color-border-glass);
+  background: #0c0d1a;
+  border: 1px solid var(--color-border-glass-hover);
   border-radius: 16px;
-  transition: background 0.3s;
 }
 
 .solid-modal {
   background: #0d0f1c;
-  backdrop-filter: none;
-  -webkit-backdrop-filter: none;
 }
 
 /* ─── Glow Effects ─────────────────────────── */
@@ -154,7 +139,8 @@ body {
 .gamepad-focus {
   outline: 3px solid var(--color-accent);
   outline-offset: 2px;
-  box-shadow: 0 0 0 3px rgba(0, 212, 255, 0.22), 0 0 12px rgba(0, 212, 255, 0.3);
+  /* 不带 box-shadow 光晕：模糊阴影每次焦点移动都要重绘一大圈，
+     电视芯片上是大头。视觉由 outline + 各组件自己的合成器层光晕承担 */
 }
 
 /* ─── Animations ───────────────────────────── */
@@ -204,7 +190,9 @@ body {
   font-size: 16px;
   font-weight: 500;
   cursor: pointer;
-  transition: all 0.2s cubic-bezier(0.22, 1, 0.36, 1);
+  transition-property: background-color, border-color, color, box-shadow, transform;
+  transition-duration: 0.2s;
+  transition-timing-function: cubic-bezier(0.22, 1, 0.36, 1);
   border: none;
   white-space: nowrap;
 }
@@ -245,7 +233,23 @@ body {
   color: #fca5a5;
 }
 
+/* ─── 视图槽位（keep-alive 切页） ─────────────
+   三视图首访后常驻、堆叠在内容区里，切页只切 visibility：
+   条件渲染会整页卸载重建（海报墙重建+重解码、动画重放、滚动丢失）；
+   visibility 隐藏保留布局（display:none 会丢 scrollTop），切回即原样 */
+.view-slot {
+  position: absolute;
+  inset: 0;
+}
+.view-hidden {
+  visibility: hidden;
+}
+
 /* ─── Nav Pills（电视版放大，适合遥控器） ──── */
+/* 顶部导航实色：glass 自带半透明，会让下方的共享背景层（StageBackdrop）透上来，
+   首页顶栏看起来变透。这里用 glass 的同色但不透明盖住，保持原来的不透明观感。
+   （详情页时整条导航由 .invisible 隐藏，不影响沉浸背景） */
+header.app-header { background: rgb(14, 15, 26); }
 .nav-pill {
   display: inline-flex;
   align-items: center;
@@ -255,7 +259,9 @@ body {
   font-size: 18px;
   font-weight: 500;
   cursor: pointer;
-  transition: all 0.2s cubic-bezier(0.22, 1, 0.36, 1);
+  transition-property: background-color, border-color, color, box-shadow, transform;
+  transition-duration: 0.2s;
+  transition-timing-function: cubic-bezier(0.22, 1, 0.36, 1);
   border: 1px solid transparent;
   color: var(--color-text-secondary);
   background: transparent;
@@ -278,6 +284,8 @@ body {
   background: rgba(0, 212, 255, 0.2);
   border-color: var(--color-border-accent);
   color: var(--color-accent);
+  /* 不做 scale/位移：缩放会让文字在聚焦/移开时上下跳一下（用户反馈「字往下落」）。
+     青色背景+描边+文字变色已足够醒目，焦点反馈不靠几何变换 */
 }
 
 /* ─── Badge ────────────────────────────────── */
@@ -335,7 +343,9 @@ body {
   color: var(--color-text-secondary);
   background: var(--color-bg-surface);
   border: 1px solid var(--color-border-glass);
-  transition: all 0.2s cubic-bezier(0.22, 1, 0.36, 1);
+  transition-property: background-color, border-color, color, box-shadow, transform;
+  transition-duration: 0.2s;
+  transition-timing-function: cubic-bezier(0.22, 1, 0.36, 1);
 }
 .chip:hover {
   color: var(--color-text-primary);
@@ -364,46 +374,60 @@ body {
 }
 
 /* ─── Hero 横幅 ────────────────────────────── */
-/* 电视屏幕大，hero 加高到 420px */
+/* 单屏三段式（hero/工具栏/海报行强制一屏）：hero 用 flex 吃掉剩余高度 */
 .hero {
   position: relative;
-  height: 420px;
+  flex: 1 1 0;
+  min-height: 0;
   display: flex;
   align-items: flex-end;
   overflow: hidden;
   isolation: isolate;
-  background: #080810;
+  /* 背景透明：影视库背景由全局 StageBackdrop 层统一提供（见 .stage-bg）。
+     Hero 条带透明、露出共享背景；下方工具栏/海报行实色挡住其余画布，于是主页
+     只在 Hero 露出背景，进详情时主页内容整体 invisible → 同一张图原地展开到整屏，
+     不换图、不重解码、不跳位 */
+  background: transparent;
 }
 
-.hero-bg {
+/* 海报环境底图（AmbientBackdrop）：32×18 canvas 由 GPU 双线性拉伸铺满。
+   双线性放大本身就是重度模糊，视觉等效 filter: blur(26px)，但只是一张小纹理采样，
+   不再有会因任何区域损伤而整层重光栅化的全屏滤镜层 */
+.ambient-canvas {
   position: absolute;
   inset: 0;
   width: 100%;
   height: 100%;
-  object-fit: cover;
-  object-position: center 18%;
-  z-index: 0;
-  transform: scale(1.02);
-  will-change: transform, opacity;
-  backface-visibility: hidden;
-  animation: hero-in 0.55s cubic-bezier(0.22, 1, 0.36, 1) both;
+  opacity: 0;
+  transition: opacity 0.45s ease;
 }
-.hero-bg-poster {
-  filter: blur(26px) saturate(1.15);
-  transform: scale(1.25);
-}
+.ambient-canvas.loaded { opacity: 1; }
 
-@keyframes hero-in {
-  from { opacity: 0; transform: scale(1.08); }
-  to { opacity: 1; transform: scale(1.02); }
-}
-
+/* hero 遮罩：给文字托底。必须与 .hero-bg 用完全相同的 scale(1.02) 几何：
+   电视画布是缩放渲染的，hero 高度是 flex 算出的非整数，合成层裁剪边界按整数
+   物理像素吸附——bg（放大边界）与 shade（原尺寸边界）几何不同就会各吸各的，
+   底边露出一条没遮罩的原图（实测存在）。几何完全一致则必然同步。
+   静态 transform 也让 shade 只光栅化一次，换图动画期间不闪；
+   层外残余的亚像素缝由工具栏顶部的实心条兜底 */
 .hero-shade {
   position: absolute;
   inset: 0;
   z-index: 1;
-  transform: translateZ(0);
+  transform: scale(1.02);
   backface-visibility: hidden;
+  background:
+    linear-gradient(to right, rgba(8, 8, 16, 0.94) 0%, rgba(8, 8, 16, 0.72) 42%, rgba(8, 8, 16, 0.15) 100%),
+    linear-gradient(to top, var(--color-bg-base) 1%, rgba(8, 8, 16, 0.25) 45%, transparent 100%);
+}
+
+/* hero 遮罩：给文字托底。注意整条链路都不能出现合成层提升（translateZ /
+   backface / transform）：单屏布局 hero 高度是 flex 算出的非整数（如 484.33px），
+   合成层边缘按整数物理像素吸附、与普通绘制层不一致，底边会漏出一条亮线
+   （电视上实测存在）。普通绘制层之间吸附一致 + 工具栏顶部实心条兜底，无缝 */
+.hero-shade {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
   background:
     linear-gradient(to right, rgba(8, 8, 16, 0.94) 0%, rgba(8, 8, 16, 0.72) 42%, rgba(8, 8, 16, 0.15) 100%),
     linear-gradient(to top, var(--color-bg-base) 1%, rgba(8, 8, 16, 0.25) 45%, transparent 100%);
@@ -469,18 +493,52 @@ body {
   overflow: hidden;
 }
 
-/* ─── 海报墙 ───────────────────────────────── */
-/* 电视屏幕远，海报加大到 minmax(200px,1fr) */
-.poster-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+/* 工具栏（单屏布局固定可见）。顶部 6px 实心条上盖：hero 高度非整数时，
+   其合成层底边与工具栏顶边之间可能漏出亚像素亮缝，这里从下方盖死 */
+.series-toolbar {
+  /* 实色底：挡住 Hero 下方的共享背景层，让背景只在 Hero 条带露出 */
+  background: var(--color-bg-base);
+  border-bottom: 1px solid var(--color-border-glass);
+  box-shadow: 0 -6px 0 0 var(--color-bg-base);
+}
+
+/* ─── 海报行（单屏单行横排） ─────────────────── */
+/* 无论多少部都排成一行：行内横向滚动，整页不滚动。
+   海报高度按画布高度反算（--tv-h 由 main.tsx 按视口写入，画布内不用 vh），
+   16:9 画布（900）下约 315px，更矮的画布自动收窄给 hero 让位 */
+.poster-shelf {
+  position: relative; /* 作为卡片 offsetParent，reveal 的横向滚动数学才成立 */
+  flex-shrink: 0;
+  display: flex;
   gap: 22px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+  padding: 14px 32px 18px;
+  /* 实色底：挡住 Hero 下方的共享背景层（否则背景会透到海报行后面） */
+  background: var(--color-bg-base);
+}
+.poster-shelf::-webkit-scrollbar { display: none; }
+.poster-shelf .poster-card {
+  flex: 0 0 auto;
+  height: clamp(240px, calc((var(--tv-h, 900px) - 150px) * 0.42), 330px);
+}
+.shelf-empty {
+  margin: auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
 }
 
 .poster-card {
   position: relative;
   cursor: pointer;
   animation: card-enter 0.3s cubic-bezier(0.2, 0, 0, 1) both;
+  transition: transform 0.18s cubic-bezier(0.22, 1, 0.36, 1);
+  contain: layout style;
+  /* 焦点不缩放、不提合成层：scale 会重采样海报照片纹理（放大→先糊后清），
+     content-visibility / contain:paint 会把 ::after 辉光裁成硬方框——两者都别用 */
 }
 .poster-card:hover { z-index: 2; }
 
@@ -492,7 +550,8 @@ body {
   overflow: hidden;
   background: #0e1018;
   border: 1px solid var(--color-border-glass);
-  transition: box-shadow 0.3s ease, border-color 0.3s ease;
+  /* 不给 box-shadow 做过渡：大半径阴影逐帧重绘，弱 TV 上焦点移动会掉帧。
+     放大（transform）走合成层，保留过渡 */
 }
 
 .poster-card:hover .poster-frame {
@@ -521,16 +580,13 @@ body {
   height: 100%;
   object-fit: cover;
   display: block;
-  transition: filter 0.3s ease;
-}
-.poster-card:hover .poster-img {
-  filter: brightness(0.92) saturate(1.02);
 }
 
-/* 右下角徽标组 */
+/* 右上角徽标组：「已看完」是较宽的胶囊，放右下会和底部标题（caption 只给右侧
+   留了窄环的 48px）重叠，移到右上角、避开标题 */
 .poster-badges {
   position: absolute;
-  bottom: 10px;
+  top: 10px;
   right: 10px;
   z-index: 3;
   pointer-events: none;
@@ -596,18 +652,24 @@ body {
 
 /* 电视版焦点：青色选中框（内侧粗描边 + 底部投影 + 外扩光晕 + 图片微提亮）。
    电视用户全靠焦点定位，比桌面版更醒目 */
-.poster-card.gamepad-focus { z-index: 3; outline: none; box-shadow: none; }
-.poster-card.gamepad-focus .poster-frame {
-  border-color: rgba(0, 212, 255, 0.9);
+/* 焦点反馈全走合成器层：光晕/描边/抬升阴影预烘焙在常驻 ::after 上，
+   焦点切换只动 opacity（无重绘），放大走 transform */
+.poster-card::after {
+  content: '';
+  position: absolute;
+  inset: -3px;
+  border-radius: 17px;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.16s ease-out;
   box-shadow:
-    inset 0 0 0 5px var(--color-accent),
+    inset 0 0 0 4px var(--color-accent),
     0 0 0 3px rgba(0, 212, 255, 0.3),
-    0 20px 44px rgba(0, 0, 0, 0.5),
-    0 0 32px rgba(0, 212, 255, 0.4);
+    0 10px 24px rgba(0, 0, 0, 0.45),
+    0 0 14px rgba(0, 212, 255, 0.35);
 }
-.poster-card.gamepad-focus .poster-img {
-  filter: brightness(1.08) saturate(1.04);
-}
+.poster-card.gamepad-focus { z-index: 3; outline: none; box-shadow: none; }
+.poster-card.gamepad-focus::after { opacity: 1; }
 
 .poster-caption {
   position: absolute;
@@ -638,389 +700,387 @@ body {
   color: rgba(255, 255, 255, 0.55);
 }
 
-/* ─── 影院式详情页 v3（单纵列动线） ─────────
-   左栏：海报 + 总进度（纯展示，不可聚焦）。
-   右栏自上而下：标题区 → 操作行 → 季 chips → 集列表。
-   遥控器上下在四层之间穿行，左右只在行内移动。
-   性能约束：整页不滚动（只有集列表内部滚）、行元素无入场动画、
-   transition 只挂焦点相关属性（电视 GPU 弱，all 会卡）。 */
-.detail2-root {
-  position: relative;
-  height: 100%;
+/* ─── 影视详情页 v5（全屏沉浸：头部信息 + 季标签 + 集列表 + 单集预览）─────
+   固定画布 1600 宽、约 900 高（16:9）。整页不滚动，只有集列表/季标签内滚。
+   性能：剧照单张静态铺底、无 backdrop-filter；焦点反馈只动 transform/颜色。 */
+.dt-root {
+  position: fixed;
+  inset: 0;
+  z-index: 90;
   overflow: hidden;
+  /* 透明：背景由全局 StageBackdrop 层（在导航/内容之下）透出，详情只叠「压暗 + 内容」。
+     不做淡入——弱机上整层 opacity 过渡会把背景+压暗+内容一起重新合成，直接硬切。 */
+  background: transparent;
 }
 
-/* 背景：absolute 单层 + 渐变压暗（不随内容滚，无重绘） */
-.detail2-backdrop {
+/* ─── 影视库共享背景层（Hero ↔ 详情同一张图）───────────────────────
+   fixed 铺满整画布，挂在顶部导航/内容区之下、装饰 .bg-ambient 之上。
+   主页只有 Hero 条带透明露出它、下方工具栏/海报行实色挡住其余；详情页整屏露出它。
+   同一个 DOM 元素、同一张已解码的图：进详情既不重新加载，也不位移，彻底消除错位。 */
+.stage-bg {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+}
+.stage-bg-fallback {
   position: absolute;
   inset: 0;
-  overflow: hidden;
-  z-index: 0;
+  background: radial-gradient(ellipse 70% 60% at 75% 10%, #2a1c52 0%, #12122c 55%, #080810 100%);
 }
-.detail2-backdrop img {
+.stage-bg-host {
+  position: absolute;
+  inset: 0;
+}
+.stage-bg-img {
+  position: absolute;
+  inset: 0;
   width: 100%;
   height: 100%;
   object-fit: cover;
-  object-position: center 20%;
+  object-position: center;
 }
-.detail2-backdrop-fade {
+/* 竖版海报环境底图：32×18 小画布由 GPU 双线性拉伸铺满（≈ 重模糊，弱 TV 不卡） */
+.stage-bg-amb {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+
+/* 左侧压暗托住文字；下半沉入底色托住列表 */
+.dt-shade {
   position: absolute;
   inset: 0;
   background:
-    linear-gradient(to top, var(--color-bg-base) 4%, rgba(8, 8, 16, 0.6) 50%, rgba(8, 8, 16, 0.42) 100%),
-    linear-gradient(to right, rgba(8, 8, 16, 0.92) 0%, rgba(8, 8, 16, 0.55) 55%, rgba(8, 8, 16, 0.35) 100%);
-}
-.detail2-backdrop-fallback {
-  background: linear-gradient(180deg, #0d0d2b 0%, rgba(13, 13, 43, 0.55) 45%, transparent 100%);
+    linear-gradient(to right, rgba(8, 8, 16, 0.96) 0%, rgba(8, 8, 16, 0.84) 32%, rgba(8, 8, 16, 0.38) 68%, rgba(8, 8, 16, 0.12) 100%),
+    linear-gradient(to top, #080810 0%, rgba(8, 8, 16, 0.94) 44%, rgba(8, 8, 16, 0.3) 70%, rgba(8, 8, 16, 0) 100%);
 }
 
-/* 左右分栏：左窄（海报+进度）+ 右宽（标题/操作/chips/集列表） */
-.detail2-grid {
+.dt-layout {
   position: relative;
   z-index: 1;
   height: 100%;
-  display: grid;
-  grid-template-columns: 240px minmax(0, 1fr);
-  gap: 30px;
-  padding: 26px 34px;
-}
-
-/* ── 左栏：海报 + 总进度（不可聚焦，遥控器焦点不进入） ── */
-.detail2-left {
-  min-height: 0;
   display: flex;
   flex-direction: column;
-  gap: 16px;
-  padding-top: 8px;
+  gap: 22px;
+  padding: 40px 56px 26px;
+  /* 整页由 .dt-root 统一控制显示时机,这里不做单独进场动画,避免与背景图错拍 */
 }
-.detail2-poster-wrap { flex-shrink: 0; }
-.detail2-poster {
-  width: 100%;
-  aspect-ratio: 2 / 3;
-  object-fit: cover;
-  border-radius: 14px;
-  border: 1px solid var(--color-border-glass);
-  box-shadow: 0 24px 50px rgba(0, 0, 0, 0.5);
-  display: block;
-}
-.detail2-poster-fallback {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: linear-gradient(135deg, #2a1a4e 0%, #0d0d2b 100%);
-}
-.detail2-progress-block {
+
+/* ── 头部 ── */
+.dt-head {
   flex-shrink: 0;
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 10px;
+  max-width: 64%;
 }
-.detail2-progress-bar {
-  height: 7px;
-  border-radius: 100px;
-  background: rgba(255, 255, 255, 0.14);
-  overflow: hidden;
-}
-.detail2-progress-fill {
-  height: 100%;
-  border-radius: 100px;
-  background: #00d4ff;
-  box-shadow: 0 0 10px rgba(0, 212, 255, 0.55);
-}
-.detail2-progress-text {
-  font-size: 13px;
-  color: rgba(255, 255, 255, 0.6);
-  white-space: nowrap;
-}
-
-/* ── 右栏 ── */
-.detail2-right {
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 14px;
-}
-
-/* 标题区 */
-.detail2-head { flex-shrink: 0; min-height: 0; }
-.detail2-title {
-  font-size: 36px;
-  line-height: 1.12;
+.dt-title {
+  font-size: 46px;
+  line-height: 1.08;
   font-weight: 800;
   letter-spacing: -0.02em;
   color: #fff;
-  text-shadow: 0 4px 30px rgba(0, 0, 0, 0.5);
+  text-shadow: 0 4px 28px rgba(0, 0, 0, 0.55);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.detail2-aliases {
-  margin-top: 2px;
+.dt-aliases {
+  margin-top: -4px;
   font-size: 15px;
   color: rgba(255, 255, 255, 0.5);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.detail2-meta {
-  margin-top: 8px;
+.dt-meta {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 8px 10px;
+  gap: 8px;
   font-size: 14px;
-  color: rgba(255, 255, 255, 0.72);
+  color: rgba(255, 255, 255, 0.85);
 }
-.detail2-meta-item + .detail2-meta-item::before {
-  content: '·';
-  margin-right: 10px;
-  color: rgba(255, 255, 255, 0.3);
+.dt-meta-item {
+  padding: 3px 12px;
+  border-radius: 100px;
+  background: rgba(255, 255, 255, 0.09);
+  border: 1px solid rgba(255, 255, 255, 0.13);
+  white-space: nowrap;
 }
-/* 简介两行截断：完整文本留给鼠标（v2 的滚动简介会把操作行挤出屏） */
-.detail2-overview {
-  margin-top: 8px;
+.dt-overview {
+  font-size: 15.5px;
+  line-height: 1.66;
+  color: rgba(255, 255, 255, 0.8);
   display: -webkit-box;
+  -webkit-line-clamp: 3;
   -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
   overflow: hidden;
-  font-size: 14px;
-  line-height: 1.6;
-  color: rgba(255, 255, 255, 0.78);
 }
-.detail2-overview-empty { color: rgba(255, 255, 255, 0.45); }
+.dt-overview.empty { color: rgba(255, 255, 255, 0.4); }
 
-/* 操作行：横排四键（播放主键 + 收藏/元数据/删除）。
-   v2 纵向四键：Down 连按一路落到「删除」且 OK 即删，误触风险高；
-   横排后 Down 只进入内容区，删除只能刻意「右」到行尾 */
-.detail2-actions {
-  flex-shrink: 0;
+/* 操作行：焦点项反白（电视十尺距离最醒目的反馈），主按钮青底 */
+.dt-actions {
+  margin-top: 8px;
   display: flex;
+  align-items: center;
   gap: 12px;
 }
-.detail2-btn {
+.dt-btn {
+  position: relative;
   display: inline-flex;
   align-items: center;
-  justify-content: center;
   gap: 9px;
-  padding: 12px 20px;
-  border-radius: 13px;
+  height: 52px;
+  padding: 0 22px;
+  border-radius: 14px;
   font-size: 16px;
   font-weight: 600;
-  cursor: pointer;
-  border: 1px solid var(--color-border-glass);
-  background: rgba(13, 15, 28, 0.72);
-  color: var(--color-text-primary);
   white-space: nowrap;
-  transition: border-color 0.15s, background 0.15s, box-shadow 0.15s;
+  cursor: pointer;
+  color: #fff;
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  transition-property: background-color, border-color, color, transform;
+  transition-duration: 0.16s;
+  transition-timing-function: cubic-bezier(0.22, 1, 0.36, 1);
+  will-change: transform; /* 焦点 scale 常驻合成层：消除进出合成层时的像素吸附「闪一下」（底部细进度条最明显） */
 }
-.detail2-btn.primary {
-  padding: 12px 28px;
+.dt-btn.primary {
+  padding: 0 26px;
+  color: #041018;
   background: var(--color-accent);
-  color: #000;
   border-color: transparent;
-  box-shadow: 0 0 20px rgba(0, 212, 255, 0.25);
+  box-shadow: 0 8px 26px rgba(0, 212, 255, 0.3);
 }
-.detail2-btn.danger {
-  color: #ef4444;
-  border-color: rgba(239, 68, 68, 0.35);
-  background: rgba(239, 68, 68, 0.1);
-}
-.detail2-btn.fav-on {
-  color: #ffd75e;
-  border-color: rgba(255, 215, 94, 0.4);
-  background: rgba(255, 215, 94, 0.1);
-}
-.detail2-btn-sub {
-  margin-left: 4px;
-  font-size: 13px;
-  opacity: 0.75;
-  font-weight: 500;
-}
-
-/* 季 chips：单行横向滚动，焦点即预览（焦点到哪片，集列表实时切到哪季） */
-.detail2-chips { flex-shrink: 0; }
-.detail2-chips-scroll {
-  display: flex;
-  gap: 8px;
-  overflow-x: auto;
-  padding: 6px;
-  scroll-padding: 6px;
-}
-.season-chip {
-  flex-shrink: 0;
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  padding: 8px 16px;
-  border-radius: 100px;
-  cursor: pointer;
-  background: rgba(255, 255, 255, 0.035);
-  border: 1px solid var(--color-border-glass);
-  transition: border-color 0.15s, background 0.15s;
-}
-.season-chip.active {
-  background: rgba(0, 212, 255, 0.1);
-  border-color: rgba(0, 212, 255, 0.45);
-}
-.season-chip-name {
+.dt-btn.primary.idle { opacity: 0.55; }
+.dt-btn-sub {
   font-size: 14px;
-  font-weight: 600;
-  color: var(--color-text-primary);
-  white-space: nowrap;
+  font-weight: 500;
+  opacity: 0.75;
 }
-.season-chip-count {
-  font-size: 12px;
-  color: var(--color-text-tertiary);
+.dt-btn-progress {
+  position: absolute;
+  left: 16px;
+  right: 16px;
+  bottom: 6px;
+  height: 3px;
+  border-radius: 3px;
+  background: rgba(4, 16, 24, 0.22);
+  overflow: hidden;
 }
-.season-chip-count.done { color: #34d399; }
+.dt-btn-progress i { display: block; height: 100%; background: #041018; opacity: 0.7; }
+.dt-btn.fav-on { color: #ffd75e; border-color: rgba(255, 215, 94, 0.45); background: rgba(255, 215, 94, 0.12); }
+.dt-btn.danger { color: #ff7a7a; border-color: rgba(239, 68, 68, 0.38); background: rgba(239, 68, 68, 0.1); }
 
-/* 集面板 */
-.detail2-eps {
+.dt-btn.gamepad-focus { z-index: 1; transform: scale(1.06); }
+.dt-btn.gamepad-focus:not(.primary) { color: #0a0b14; background: #fff; border-color: #fff; }
+.dt-btn.danger.gamepad-focus { color: #fff; background: #e5484d; border-color: #e5484d; }
+
+/* ── 下半 ── */
+.dt-lower {
   flex: 1;
   min-height: 0;
   display: flex;
   flex-direction: column;
+  gap: 14px;
+}
+.dt-lower-head {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  min-height: 56px;
+}
+.dt-lower-title {
+  font-size: 20px;
+  font-weight: 700;
 }
 
-.detail2-panel-head {
+/* 季标签：单行横滚，四周留白防焦点辉光被裁 */
+.dt-tabs {
+  flex: 0 1 auto;
+  min-width: 0;
+  position: relative; /* 作为子标签的 offsetParent，reveal 的 offsetLeft 滚动数学才成立 */
+  display: flex;
+  gap: 10px;
+  overflow-x: auto;
+  padding: 8px;
+  margin: -8px;
+  scrollbar-width: none;
+}
+.dt-tabs::-webkit-scrollbar { display: none; }
+.dt-tab {
+  position: relative;
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 10px 18px 13px;
+  border-radius: 12px;
+  cursor: pointer;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid var(--color-border-glass);
+  transition-property: transform; /* 颜色瞬时切换（跟手），只有缩放走过渡 */
+  transition-duration: 0.15s;
+  transition-timing-function: cubic-bezier(0.22, 1, 0.36, 1);
+  will-change: transform; /* 焦点 scale 常驻合成层：消除进出合成层时的像素吸附「闪一下」（底部细进度条最明显） */
+}
+.dt-tab-name { font-size: 15.5px; font-weight: 600; color: #fff; white-space: nowrap; }
+.dt-tab-count {
+  display: inline-flex;
+  align-items: center;
+  font-size: 12.5px;
+  color: var(--color-text-tertiary);
+}
+.dt-tab.done .dt-tab-count { color: #34d399; }
+.dt-tab-bar {
+  position: absolute;
+  left: 14px;
+  right: 14px;
+  bottom: 5px;
+  height: 2px;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.1);
+  overflow: hidden;
+}
+.dt-tab-bar i { display: block; height: 100%; background: var(--color-accent); }
+.dt-tab.done .dt-tab-bar i { background: #34d399; }
+.dt-tab.active { background: rgba(0, 212, 255, 0.14); border-color: rgba(0, 212, 255, 0.55); }
+.dt-tab.gamepad-focus { z-index: 1; transform: scale(1.06); background: rgba(0, 212, 255, 0.14); border-color: rgba(0, 212, 255, 0.55); }
+
+.dt-overall {
   flex-shrink: 0;
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 0 4px 8px;
-}
-.detail2-panel-title {
-  font-size: 18px;
-  font-weight: 700;
-  color: var(--color-text-primary);
+  margin-left: auto;
+  font-size: 13.5px;
+  color: var(--color-text-secondary);
   white-space: nowrap;
 }
-/* 按键提示（OK 播放 / 长按 OK 更多）：长按是隐藏交互，给常驻可发现性 */
-.detail2-hint {
-  margin-left: auto;
-  font-size: 12px;
+.dt-overall-bar {
+  width: 140px;
+  height: 5px;
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.12);
+  overflow: hidden;
+}
+.dt-overall-bar i { display: block; height: 100%; background: var(--color-accent); }
+.dt-hint {
+  flex-shrink: 0;
+  font-size: 12.5px;
   color: var(--color-text-tertiary);
   white-space: nowrap;
 }
-.detail2-panel-tools {
-  display: flex;
-  gap: 8px;
-}
-.detail2-tool {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 7px 12px;
-  border-radius: 9px;
-  font-size: 13px;
-  font-weight: 500;
-  cursor: pointer;
-  color: var(--color-text-secondary);
-  background: var(--color-bg-surface);
-  border: 1px solid var(--color-border-glass);
-  transition: border-color 0.15s, background 0.15s;
-}
-.detail2-tool:hover {
-  color: var(--color-text-primary);
-  border-color: var(--color-border-glass-hover);
-}
+.dt-lower-title + .dt-hint,
+.dt-tabs + .dt-hint { margin-left: auto; }
 
-/* 集列表滚动口：四周留 6px + scroll-padding，否则 .gamepad-focus 的
-   outline/辉光会被滚动口边缘硬切、scrollIntoView 后贴边更明显（同设置页 NAS 列表） */
-.detail2-eps-scroll {
+/* 单季/无季(既无季标签也无「剧集」标题):不再撑起 56px 空带,行按内容高度
+   收缩,集列表整体上移紧贴操作行。进度条保持默认右对齐(靠右更顺眼) */
+.dt-lower-head.bare { min-height: 0; }
+
+.dt-browse {
   flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 400px;
+  gap: 28px;
+}
+.dt-browse.solo { grid-template-columns: minmax(0, 1fr); }
+
+/* 集列表（唯一纵向内滚区）。position:relative 让行的 offsetTop 以列表为基准 */
+.dt-eps {
+  position: relative;
   min-height: 0;
   overflow-y: auto;
   display: flex;
   flex-direction: column;
   gap: 8px;
-  padding: 6px;
-  scroll-padding: 6px;
+  padding: 6px 14px 6px 6px;
+  scrollbar-width: thin;
+  /* 关键(真机 CDP 实测 2026-09-26)：本列表与右侧单集预览同处 .dt-browse 网格。
+     焦点每移一格预览的文字(标题/简介/元信息)就换，会让网格重新测量→把这条 N 行
+     长列表整列 reflow，每次按键 ~105ms、每格一个长任务。size 收束让列表尺寸不参与
+     网格测量（尺寸本就由 1fr 网格列+flex 决定，不依赖内容），预览变化不再牵动集列表：
+     实测每次按键降到 ~48ms、长任务基本消失。不加 paint，避免裁掉焦点行的辉光/位移
+     （见 [[tv-device-profile]] 里 contain:paint 裁 ::before 的坑）。 */
+  contain: size layout;
 }
-.detail2-eps-empty {
+.dt-empty {
   flex: 1;
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 10px;
-  color: var(--color-text-secondary);
+  gap: 12px;
   font-size: 15px;
+  color: var(--color-text-secondary);
 }
 
-/* 集行：序号 + 标题/元信息 + 状态徽标（无剧照——
-   428 张 w342 图在电视 WebView 上解码 + 滚动是旧版卡顿主因，
-   行内文字信息足够定位，剧照留给播放） */
-.ep-row2 {
+.dt-ep {
+  position: relative;
+  flex-shrink: 0;
   width: 100%;
-  display: flex;
+  display: grid;
+  grid-template-columns: 44px minmax(0, 1fr) auto 36px;
   align-items: center;
-  gap: 14px;
-  padding: 11px 16px;
-  border-radius: 12px;
+  gap: 16px;
+  padding: 12px 18px;
+  border-radius: 14px;
   cursor: pointer;
   text-align: left;
-  background: rgba(255, 255, 255, 0.035);
+  background: rgba(255, 255, 255, 0.04);
   border: 1px solid var(--color-border-glass);
-  transition: border-color 0.15s, background 0.15s;
+  transition-property: transform;
+  transition-duration: 0.15s;
+  transition-timing-function: cubic-bezier(0.22, 1, 0.36, 1);
+  contain: layout style;
+  content-visibility: auto; /* 只绘制可见集行，长剧集季打开更快（弱 GPU） */
+  contain-intrinsic-size: auto 64px;
 }
-.ep-row2-num {
-  width: 44px;
-  flex-shrink: 0;
-  font-size: 15px;
+/* 焦点高亮：常驻 ::before 烘焙底色+描边，只动 opacity（合成器层，无整行重绘） */
+.dt-ep::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: 14px;
+  background: rgba(0, 212, 255, 0.12);
+  border: 1px solid rgba(0, 212, 255, 0.6);
+  opacity: 0;
+  transition: opacity 0.15s ease-out;
+  pointer-events: none;
+}
+.dt-ep-num {
+  font-size: 18px;
   font-weight: 700;
   font-variant-numeric: tabular-nums;
   color: var(--color-accent);
   text-align: right;
 }
-.ep-row2-body {
-  min-width: 0;
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-.ep-row2-title {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 15px;
+.dt-ep-main { min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.dt-ep-title {
+  font-size: 16px;
   font-weight: 600;
-  color: var(--color-text-primary);
-  overflow: hidden;
-  white-space: nowrap;
-}
-.ep-row2-title > span:first-child {
+  color: #fff;
   overflow: hidden;
   text-overflow: ellipsis;
+  white-space: nowrap;
 }
-.ep-row2-vote {
-  display: inline-flex;
-  align-items: center;
-  gap: 3px;
-  flex-shrink: 0;
-  font-size: 12px;
-  font-weight: 500;
-  color: rgba(250, 204, 21, 0.85);
-}
-.ep-row2-done-icon { flex-shrink: 0; color: #34d399; }
-.ep-row2-meta {
-  display: flex;
-  align-items: center;
-  gap: 12px;
+.dt-ep-sub {
   font-size: 12.5px;
   color: var(--color-text-tertiary);
   overflow: hidden;
+  text-overflow: ellipsis;
   white-space: nowrap;
 }
-.ep-row2-meta > span {
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.ep-row2-badge {
-  width: 34px;
-  height: 34px;
-  flex-shrink: 0;
+.dt-ep.nofile .dt-ep-sub { color: rgba(245, 158, 11, 0.8); }
+.dt-ep-dur { font-size: 13px; color: var(--color-text-secondary); white-space: nowrap; }
+.dt-ep-badge {
+  width: 36px;
+  height: 36px;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -1029,29 +1089,156 @@ body {
   font-weight: 700;
   font-variant-numeric: tabular-nums;
   color: var(--color-text-tertiary);
-  background: rgba(255, 255, 255, 0.06);
+  background: rgba(255, 255, 255, 0.07);
 }
-.ep-row2-badge.done {
-  color: #fff;
-  background: #34d399;
+.dt-ep-badge.done { color: #fff; background: #22b07d; }
+.dt-ep-badge.partial { color: #03222e; background: var(--color-accent); }
+.dt-ep-progress {
+  position: absolute;
+  left: 78px;
+  right: 18px;
+  bottom: 5px;
+  height: 2px;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.1);
+  overflow: hidden;
 }
-.ep-row2-badge.watching {
-  color: #03222e;
-  background: #00d4ff;
-}
+.dt-ep-progress i { display: block; height: 100%; background: var(--color-accent); }
+/* 看过的集压暗一档：一眼看出「看到哪了」 */
+.dt-ep.watched .dt-ep-num,
+.dt-ep.watched .dt-ep-title { color: rgba(255, 255, 255, 0.5); }
 
-/* 已看/在看行信号 */
-.ep-row2.watched .ep-row2-title { color: #34d399; }
-.ep-row2.watching { border-color: rgba(0, 212, 255, 0.28); }
-
-/* 聚焦行/按钮抬升到相邻元素之上：后渲染的兄弟背景会盖住前一元素的辉光
-   （行间距 8px、chips 间距 8px、操作键间距 12px 都小于辉光半径，同 .nas-row 的处理） */
-.season-chip.gamepad-focus,
-.ep-row2.gamepad-focus,
-.detail2-btn.gamepad-focus {
-  position: relative;
+.dt-ep.gamepad-focus {
   z-index: 1;
+  outline: none;
+  transform: translateX(6px);
 }
+.dt-ep.gamepad-focus::before { opacity: 1; }
+.dt-ep.gamepad-focus .dt-ep-num,
+.dt-ep.gamepad-focus .dt-ep-title { color: #fff; }
+
+/* 单集预览面板 */
+.dt-preview {
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 14px 14px 16px;
+  border-radius: 18px;
+  background: rgba(14, 15, 27, 0.86);
+  border: 1px solid var(--color-border-glass);
+  overflow: hidden;
+}
+.dt-still {
+  position: relative;
+  flex-shrink: 0;
+  aspect-ratio: 16 / 9;
+  border-radius: 12px;
+  overflow: hidden;
+  background: linear-gradient(135deg, #1f1840 0%, #10122a 60%, #0b0c1a 100%);
+  margin-bottom: 4px;
+}
+/* 剧照不做淡入：换 src 时浏览器保留旧帧直到新图解码完，即解码即显示。
+   若加 opacity 过渡，新图挂载期间是透明的，会露出底下的占位字 */
+.dt-still img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+/* 剧照节点挂载宿主（JS 把已解码的 <img> 塞进来）：铺满 .dt-still，img 走上面的规则 */
+.dt-still-img {
+  position: absolute;
+  inset: 0;
+}
+.dt-still-fallback {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 30px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  color: rgba(255, 255, 255, 0.16);
+  font-variant-numeric: tabular-nums;
+}
+.dt-still-flag {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 10px;
+  border-radius: 100px;
+  font-size: 12px;
+  font-weight: 700;
+  color: #fff;
+  background: rgba(34, 176, 125, 0.92);
+}
+.dt-still-progress {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 4px;
+  background: rgba(0, 0, 0, 0.5);
+}
+.dt-still-progress i { display: block; height: 100%; background: var(--color-accent); }
+.dt-pv-kicker {
+  font-size: 12.5px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: var(--color-accent);
+}
+.dt-pv-title {
+  font-size: 19px;
+  font-weight: 700;
+  line-height: 1.3;
+  color: #fff;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.dt-pv-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 14px;
+  font-size: 13px;
+  color: var(--color-text-secondary);
+}
+.dt-pv-vote {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-weight: 600;
+  color: #ffc94d;
+}
+.dt-pv-overview {
+  flex: 1 1 0;
+  min-height: 0;
+  font-size: 14px;
+  line-height: 1.65;
+  color: rgba(255, 255, 255, 0.72);
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 6;
+  -webkit-box-orient: vertical;
+}
+.dt-pv-overview.empty { color: var(--color-text-tertiary); }
+.dt-pv-file {
+  flex-shrink: 0;
+  font-size: 12px;
+  color: var(--color-text-tertiary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.dt-pv-file.missing { color: rgba(245, 158, 11, 0.8); }
 
 /* ─── 操作表（ActionSheet：长按 OK / 删除确认共用） ── */
 .action-sheet-item {
@@ -1068,13 +1255,14 @@ body {
   color: var(--color-text-primary);
   background: rgba(255, 255, 255, 0.035);
   border: 1px solid var(--color-border-glass);
-  transition: border-color 0.15s, background 0.15s;
+  transition: border-color 0.15s, background 0.15s, transform 0.15s cubic-bezier(0.22, 1, 0.36, 1);
 }
 .action-sheet-item.danger {
   color: #ef4444;
   border-color: rgba(239, 68, 68, 0.35);
   background: rgba(239, 68, 68, 0.1);
 }
+.action-sheet-item.gamepad-focus { transform: scale(1.02); }
 
 /* ─── TMDB 候选选择 ────────────────────────── */
 .tmdb-option {
@@ -1120,7 +1308,8 @@ body {
   border-radius: 50%;
   color: var(--color-text-tertiary);
   border: 1px solid var(--color-border-glass);
-  transition: all 0.2s;
+  transition-property: background-color, border-color, color;
+  transition-duration: 0.2s;
 }
 .tmdb-option:hover .tmdb-option-pick {
   color: #000;
@@ -1155,9 +1344,7 @@ body {
   border-radius: 16px;
   border: 1px solid var(--color-border-glass);
   border-top: 2px solid var(--cc);
-  background: var(--color-bg-surface);
-  backdrop-filter: blur(16px);
-  -webkit-backdrop-filter: blur(16px);
+  background: rgba(16, 17, 30, 0.9);
 }
 
 .stats-col-head {
@@ -1388,6 +1575,7 @@ body {
 .add-pick-row.gamepad-focus {
   border-color: rgba(0, 212, 255, 0.7);
   background: rgba(0, 212, 255, 0.06);
+  transform: translateX(4px);
 }
 
 /* ─── 设置页（电视版） ─────────────────────── */
@@ -1396,10 +1584,8 @@ body {
 .set-section {
   padding: 14px 20px;
   border-radius: 16px;
-  background: var(--color-bg-surface);
+  background: rgba(16, 17, 30, 0.9);
   border: 1px solid var(--color-border-glass);
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
   transition: border-color 0.2s, box-shadow 0.2s;
 }
 
@@ -1444,7 +1630,8 @@ body {
   color: var(--color-text-secondary);
   background: var(--color-bg-surface);
   border: 1px solid var(--color-border-glass);
-  transition: all 0.2s;
+  transition-property: background-color, border-color, color;
+  transition-duration: 0.2s;
 }
 .nas-action:hover {
   color: var(--color-accent);

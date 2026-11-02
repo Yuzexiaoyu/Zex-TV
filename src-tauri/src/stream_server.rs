@@ -11,8 +11,8 @@
 // 设计要点（v2 重写，修掉 v1 的四个致命问题）：
 //   1. 流式响应：v1 把 Range 的整个区间一次性 read_at 进 Vec——`bytes=0-` 直接
 //      分配整个文件（数 GB）的内存，电视必 OOM。现在自定义 Read 适配器按
-//      CHUNK（512KB）分块从 SMB 拉数据，tiny_http 的 raw_print 走 io::copy
-//      边拉边写 socket，内存峰值 ≈ 一个块。
+//      CHUNK（1MB）分块从 SMB 拉数据，tiny_http 的 raw_print 走 io::copy
+//      边拉边写 socket，内存峰值 ≈ 预读深度个块。
 //   2. 生命周期：v1 的 stop_active 只摘 ACTIVE 里的 Arc，serve_loop 线程自己
 //      还 clone 着 Arc → Server 永不 Drop → 端口 8765 占死，第二次播放
 //      Server::http 直接 AddrInUse 必失败。现在改为「代际」模式：每次播放
@@ -26,7 +26,10 @@
 //      这里一个监听线程接请求、每个请求 spawn 独立线程处理，互不阻塞。
 //   4. SMB 句柄：v1 的 FileReader 从不 close（smb2 的 Drop 不发 CLOSE，句柄
 //      泄漏到会话结束，NAS 上限 8192 个打开文件迟早耗尽）。现在代际退出时
-//      显式 close（close 消耗 self，用 Option 持有、take 后发送）。
+//      等在途读取放手后显式 close。
+//   5. 吞吐（v4）：各连接并发 read_at（不再共用一把跨 await 的锁）+ 深度预读
+//      （PREFETCH_DEPTH 个块并行在途），把延迟受限的串行读摊成 N 路并行，
+//      吞吐翻几倍以扛 4K 原盘 VBR 峰值（v3 只预读一块、深度=1，仍卡在单读延迟）。
 //
 // HTTP 细节：
 //   - GET/HEAD 支持（ExoPlayer 系播放器会先 HEAD 探活；tiny_http 对 HEAD 自动不发 body）
@@ -35,6 +38,7 @@
 //
 // 电视系统播放器进度不可回传，回 App 后弹「看完了吗」确认框手动标记（前端处理）。
 
+use std::collections::VecDeque;
 use std::io::{self, Read};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -47,16 +51,25 @@ use crate::db;
 use crate::smb;
 use crate::{AppError, AppResult, AppState};
 
-/// SMB → 内存的单块大小：太小网络往返多吞吐低，太大占内存+播放器首块慢。512KB 实测均衡
-const CHUNK: u64 = 512 * 1024;
+/// SMB → 内存的单块大小：1MB（≈ 常见 SMB MaxReadSize，一块一次线读）。
+/// 太小网络往返多、吞吐被延迟拖垮；太大占内存 + 播放器首块变慢
+const CHUNK: u64 = 1024 * 1024;
+
+/// 并发预读深度：同时在途的块读数。把「读一块→写一块」的延迟受限串行，
+/// 变成 N 路并行 read_at（read_at 是 &self、官方可并发），吞吐随之翻几倍。
+/// 内存上限 ≈ (DEPTH+1)×CHUNK/连接（8+1MB≈9MB），播放器一般就 1~2 条连接。
+/// 目标：把 ~69 Mbps 天花板顶到能扛 4K 原盘 VBR 峰值（~120 Mbps ≈ 15 MB/s）
+const PREFETCH_DEPTH: usize = 8;
 
 // 全局：当前活跃的流（同一时刻只服务一个播放会话）。
 // 每次播放新起一代；旧代由 play_episode 显式 retire，等引用归零自然清理
 struct ActiveStream {
     server: Server,
-    /// SMB reader。close 消耗 self，用 Option 持有以便代际退出时取出发 CLOSE。
-    /// 读取路径只借 &self（read_at 是 &self），Mutex 只为 take() 时的独占。
-    reader: Mutex<Option<smb2::FileReader>>,
+    /// SMB reader。read_at 是 &self 且官方声明可并发，所以各连接各自 clone 一份
+    /// Arc 并行读——锁只在 clone/take 的瞬间持有，绝不跨 await（v2 把锁攥过整个
+    /// read_at，播放器并发的探测连接和拉流连接被串行化，拖进度条时互相卡）。
+    /// close 消耗 self：代际退出时 take 出来，等在途读取放掉引用再发 CLOSE
+    reader: Mutex<Option<Arc<smb2::FileReader>>>,
     size: u64,
     content_type: String,
     /// 停止标记：置位后监听线程退出 recv 循环、响应 reader 停止继续拉数据
@@ -123,7 +136,7 @@ pub async fn play_episode(state: &AppState, app: &AppHandle, episode_id: &str) -
     let generation = GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
     let stream = Arc::new(ActiveStream {
         server: http,
-        reader: Mutex::new(Some(reader)),
+        reader: Mutex::new(Some(Arc::new(reader))),
         size,
         content_type,
         stopped: AtomicBool::new(false),
@@ -146,7 +159,13 @@ pub async fn play_episode(state: &AppState, app: &AppHandle, episode_id: &str) -
     // 即此症状。文件名 percent-encode 进路径（服务端不校验路径，见 handle_request）
     let filename = rel_path.rsplit(['/', '\\']).find(|s| !s.is_empty()).unwrap_or("video");
     let url = format!("http://127.0.0.1:{port}/{}", urlencoding::encode(filename));
-    launch_player(app, &url, &intent_mime)?;
+    // 起前台服务保活：必须在拉起播放器（ZEX 随即退后台）之前，否则进程被电视冻结器
+    // 冻住，流代理停摆 → 播放器放完首段就无限加载。app-resumed 时停（见 lib.rs）
+    start_stream_service(app, filename);
+    if let Err(e) = launch_player(app, &url, &intent_mime) {
+        stop_stream_service(app); // 没拉起成功就别把前台服务/通知晾着
+        return Err(e);
+    }
 
     // 回执改由 App 回前台触发（lib.rs 里 RunEvent Resumed → emit "app-resumed"，
     // 前端收到且有未回执的播放会话时弹「看完了吗」）。这里只登记当前会话：
@@ -225,14 +244,17 @@ fn handle_request(stream: Arc<ActiveStream>, runtime_handle: tokio::runtime::Han
     let length = end - start + 1;
     let status: u16 = if range_header.is_some() { 206 } else { 200 };
 
-    // 流式 reader：SmbStreamReader 内部按 CHUNK 分块 read_at
+    // 流式 reader：SmbStreamReader 内部按 CHUNK 分块 read_at（HEAD 不发 body，不读）
     let body = SmbStreamReader {
         stream: stream.clone(),
         runtime_handle,
         offset: start,
-        remaining: length,
+        remaining: if is_head { 0 } else { length },
         buffer: Vec::new(),
         buf_pos: 0,
+        ahead: VecDeque::new(),
+        fetch_off: start,
+        fetch_rem: if is_head { 0 } else { length },
     };
 
     let mut resp = Response::new(
@@ -260,54 +282,100 @@ fn handle_request(stream: Arc<ActiveStream>, runtime_handle: tokio::runtime::Han
 // 流式 body：按块从 SMB 拉，不整段入内存
 // ─────────────────────────────────────────────
 
+type BlockTask = tokio::task::JoinHandle<Result<Vec<u8>, String>>;
+
 /// Read 适配器：tiny_http 的 raw_print 对 body 走 io::copy —— 每次 read(buf)
 /// 返回一小块。io::copy 的 buf 只有 8KB 级，若每 8KB 发一次 SMB READ 往返
-/// 吞吐会被延迟拖垮；所以内部按 CHUNK（512KB）聚合：缓冲耗尽才走网络，
-/// 从缓冲顺序拷给调用方。内存峰值 ≈ 一个块，与文件总大小无关（v1 是整个
-/// Range 区间一次 read_at 进 Vec —— 播放器 `bytes=0-` 探测直接分配数 GB，OOM）。
+/// 吞吐会被延迟拖垮；所以内部按 CHUNK（1MB）聚合：缓冲耗尽才走网络，
+/// 从缓冲顺序拷给调用方（v1 是整个 Range 区间一次 read_at 进 Vec ——
+/// 播放器 `bytes=0-` 探测直接分配数 GB，OOM）。
+///
+/// 深度预读（v4）：维持 PREFETCH_DEPTH 个块的 read_at **并行在途**——read_at 是
+/// &self 且官方可并发，N 路并行把「读一块→写一块」的延迟受限串行摊平，吞吐随
+/// N 翻几倍（v3 只预读一块，深度=1，仍被单读延迟卡住，4K 原盘峰值跟不上就转圈）。
+/// consume 游标(offset/remaining) 与 prefetch 游标(fetch_off/fetch_rem) 分开：
+/// 前者按交给播放器的量走，后者按已派发的读请求走。
 ///
 /// 播放器拖进度条会弃掉旧连接：io::copy 遇 BrokenPipe/ConnectionReset 返回，
-/// reader 随响应被 Drop，remaining 丢弃即停止拉取（v1 是继续把整段拉完）
+/// reader 随响应被 Drop（drain 掉全部在途预读 abort），remaining 丢弃即停止拉取
 struct SmbStreamReader {
     stream: Arc<ActiveStream>,
     runtime_handle: tokio::runtime::Handle,
-    /// 当前块内的游标位置（绝对文件偏移）
+    /// 下一个要交给调用方的字节的绝对文件偏移
     offset: u64,
-    /// 本响应还剩多少字节
+    /// 本响应还剩多少字节要交给调用方
     remaining: u64,
-    /// 块缓冲（SMB 拉回的 512KB），buf_pos 是已消费位置
+    /// 块缓冲（SMB 拉回的 1MB），buf_pos 是已消费位置
     buffer: Vec<u8>,
     buf_pos: usize,
+    /// 在途/已就绪的预读块，按文件顺序排队（队首 = 下一块）
+    ahead: VecDeque<BlockTask>,
+    /// 下一块要派发预读的偏移
+    fetch_off: u64,
+    /// 还剩多少字节要派发预读（初值 = 本响应长度，随派发递减）
+    fetch_rem: u64,
 }
 
 impl SmbStreamReader {
-    /// 从 SMB 拉下一块填充 buffer。失败时返回 io 错误——tiny_http 的
-    /// respond 会把半途断流如实写给播放器（比吞错误假装 EOF 好：
-    /// 播放器会按网络错误重试，而不是把截断的文件当正常播完）
-    fn fetch_block(&mut self) -> io::Result<()> {
-        let want = CHUNK.min(self.remaining);
-        let offset = self.offset;
-        // 拿 Arc 克隆 + stopped 标志副本进 async 块，避免借用 self 跨 await
+    /// 在 runtime 上发起一次块读取。stopped 检查放 await 前：退役后不再发起网络读
+    fn spawn_read(&self, offset: u64, len: u64) -> BlockTask {
         let stream = self.stream.clone();
+        self.runtime_handle.spawn(async move {
+            if stream.stopped.load(Ordering::Acquire) {
+                return Ok(Vec::new());
+            }
+            let reader = stream.reader.lock().clone();
+            match reader {
+                Some(reader) => reader.read_at(offset, len).await.map_err(|e| e.to_string()),
+                None => Ok(Vec::new()),
+            }
+        })
+    }
+
+    /// 把在途预读补到 PREFETCH_DEPTH：多个 read_at 并行发出，藏住网络往返延迟
+    fn top_up(&mut self) {
+        while self.ahead.len() < PREFETCH_DEPTH && self.fetch_rem > 0 {
+            let len = CHUNK.min(self.fetch_rem);
+            let task = self.spawn_read(self.fetch_off, len);
+            self.ahead.push_back(task);
+            self.fetch_off += len;
+            self.fetch_rem -= len;
+        }
+    }
+
+    /// 取下一块填充 buffer：先补满在途队列，再取队首（多半已并行读完）。
+    /// 失败时返回 io 错误——tiny_http 的 respond 会把半途断流如实写给播放器
+    /// （比吞错误假装 EOF 好：播放器会按网络错误重试，而不是把截断的文件当正常播完）
+    fn fetch_block(&mut self) -> io::Result<()> {
+        self.top_up();
+        let task = match self.ahead.pop_front() {
+            Some(t) => t,
+            None => {
+                // 没有更多可读（已全部派发并消费）
+                self.buffer = Vec::new();
+                self.buf_pos = 0;
+                return Ok(());
+            }
+        };
         let data = self
             .runtime_handle
-            .block_on(async move {
-                // stopped 检查放 await 前：retire_active 置位后不再发起网络读
-                if stream.stopped.load(Ordering::Acquire) {
-                    return Ok(Vec::new());
-                }
-                // &self 借 reader（只读路径），锁只在 borrow 瞬间持有；
-                // close 的 take() 在 retire_active，与这里天然互斥
-                let guard = stream.reader.lock();
-                match guard.as_ref() {
-                    Some(reader) => reader.read_at(offset, want).await,
-                    None => Ok(Vec::new()),
-                }
-            })
+            .block_on(task)
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("SMB 读取任务异常：{e}")))?
             .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("SMB 读取失败：{e}")))?;
+        // 消费掉队首后立刻补一块，维持在途深度不塌
+        self.top_up();
         self.buffer = data;
         self.buf_pos = 0;
         Ok(())
+    }
+}
+
+impl Drop for SmbStreamReader {
+    fn drop(&mut self) {
+        // 弃流：把全部在途预读任务 abort，别再往已断的 socket / 已退役的会话拉数据
+        for task in self.ahead.drain(..) {
+            task.abort();
+        }
     }
 }
 
@@ -353,15 +421,28 @@ fn retire_active() {
     stream.stopped.store(true, Ordering::Release);
     // unblock 让监听线程的 recv 立刻返回 Err 退出
     stream.server.unblock();
-    // SMB CLOSE：句柄立即还给 NAS（不必等引用归零）
+    // SMB CLOSE：句柄尽快还给 NAS（不必等 Server 引用归零）。close 消耗 self，
+    // 得等在途读取（各连接线程/预读任务）放掉各自的 Arc 克隆；stopped 已置位，
+    // 它们不会再发起新读，最多等一个块的时间。spawn 到 runtime 上异步等，不阻塞本调用
     if let Some(reader) = stream.reader.lock().take() {
         let rt = tokio::runtime::Handle::current();
-        // close 是 async；在当前（tauri runtime）线程上直接执行会与监听线程的
-        // block_on 抢同一个 runtime —— spawn 到 runtime 上异步跑，不阻塞本调用
         let _ = rt.spawn(async move {
-            if let Err(e) = reader.close().await {
-                log::warn!("SMB reader 关闭失败（句柄将由会话回收）：{e}");
+            let mut reader = reader;
+            for _ in 0..50 {
+                match Arc::try_unwrap(reader) {
+                    Ok(owned) => {
+                        if let Err(e) = owned.close().await {
+                            log::warn!("SMB reader 关闭失败（句柄将由会话回收）：{e}");
+                        }
+                        return;
+                    }
+                    Err(shared) => {
+                        reader = shared;
+                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    }
+                }
             }
+            log::warn!("SMB reader 仍被占用，放弃显式 CLOSE（句柄将由会话回收）");
         });
     }
     log::debug!("已退役流 gen={}", stream.generation);
@@ -533,6 +614,128 @@ fn jni_call_launcher(
             .into();
         Err(msg)
     }
+}
+
+// ─────────────────────────────────────────────
+// 播放期间前台服务（保活流代理，防止被冻结/杀掉）
+// ─────────────────────────────────────────────
+
+/// 播放开始时拉起前台服务：ZEX 拉起系统播放器后自己退后台会被电视冻结器冻住，
+/// 流代理线程停摆 → 播放器放完首段缓冲后再要数据拿不到 → 无限加载。前台服务把
+/// 进程抬到前台优先级，冻结器/LMK 不再动它。必须在 ZEX 仍前台时调用（拉起播放器
+/// 之前）——targetSdk 34+ 禁止后台启动 FGS。
+#[cfg(target_os = "android")]
+pub fn start_stream_service(app: &AppHandle, title: &str) {
+    let title = title.to_string();
+    dispatch_service_jni(app, move |env, activity| {
+        jni_call_service(env, activity, "start", Some(&title))
+    });
+}
+
+/// 播放器退回 App 时停掉前台服务（见 lib.rs RunEvent::Resumed）。
+#[cfg(target_os = "android")]
+pub fn stop_stream_service(app: &AppHandle) {
+    dispatch_service_jni(app, move |env, activity| {
+        jni_call_service(env, activity, "stop", None)
+    });
+}
+
+#[cfg(not(target_os = "android"))]
+pub fn start_stream_service(_app: &AppHandle, _title: &str) {}
+#[cfg(not(target_os = "android"))]
+pub fn stop_stream_service(_app: &AppHandle) {}
+
+// __FGS_MARKER2__
+
+/// 把 JNI 调用派发到 wry 主线程，发后不等结果（stop 可能从事件循环线程调，绝不
+/// 阻塞；start 的失败只记日志、不该拦住播放）。
+#[cfg(target_os = "android")]
+fn dispatch_service_jni<F>(app: &AppHandle, f: F)
+where
+    F: FnOnce(&mut jni::JNIEnv, &jni::objects::JObject) -> Result<(), String> + Send + 'static,
+{
+    use tauri::Manager;
+    let Some(window) = app.get_webview_window("main") else {
+        log::warn!("StreamService：主窗口不存在，跳过");
+        return;
+    };
+    let dispatched = window.with_webview(move |platform_webview| {
+        platform_webview.jni_handle().exec(move |env, activity, _webview| {
+            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(env, activity)))
+                .unwrap_or_else(|_| Err("JNI 调用内部异常".to_string()));
+            if let Err(e) = r {
+                log::warn!("StreamService JNI：{e}");
+            }
+        });
+    });
+    if let Err(e) = dispatched {
+        log::warn!("StreamService：with_webview 派发失败：{e}");
+    }
+}
+
+// __FGS_MARKER3__
+
+/// 经 Activity 的 ClassLoader 加载 StreamServiceCtl 调其静态 start/stop
+/// （exec 回调无 Java 栈帧，FindClass 看不到应用类，必须走 ClassLoader，同 launcher）。
+#[cfg(target_os = "android")]
+fn jni_call_service(
+    env: &mut jni::JNIEnv,
+    activity: &jni::objects::JObject,
+    method: &str,
+    title: Option<&str>,
+) -> Result<(), String> {
+    use jni::objects::{JClass, JValue};
+
+    let loader = env.call_method(activity, "getClassLoader", "()Ljava/lang/ClassLoader;", &[]);
+    if loader.is_err() {
+        let _ = env.exception_clear();
+    }
+    let loader = loader
+        .map_err(|e| format!("取 ClassLoader 失败：{e}"))?
+        .l()
+        .map_err(|e| format!("ClassLoader 返回值异常：{e}"))?;
+
+    let name = env
+        .new_string("com.zex.tv.StreamServiceCtl")
+        .map_err(|e| format!("构造类名失败：{e}"))?;
+    let class = env.call_method(
+        &loader,
+        "loadClass",
+        "(Ljava/lang/String;)Ljava/lang/Class;",
+        &[JValue::Object(&name)],
+    );
+    if class.is_err() {
+        let _ = env.exception_clear();
+    }
+    let class = class
+        .map_err(|e| format!("加载 StreamServiceCtl 失败：{e}"))?
+        .l()
+        .map_err(|e| format!("loadClass 返回值异常：{e}"))?;
+    let class = JClass::from(class);
+
+    let call = if method == "start" {
+        let jtitle = env
+            .new_string(title.unwrap_or(""))
+            .map_err(|e| format!("构造 JString 失败：{e}"))?;
+        env.call_static_method(
+            class,
+            "start",
+            "(Landroid/content/Context;Ljava/lang/String;)Ljava/lang/String;",
+            &[JValue::Object(activity), JValue::Object(&jtitle)],
+        )
+    } else {
+        env.call_static_method(
+            class,
+            "stop",
+            "(Landroid/content/Context;)Ljava/lang/String;",
+            &[JValue::Object(activity)],
+        )
+    };
+    if call.is_err() {
+        let _ = env.exception_clear();
+    }
+    let _ = call.map_err(|e| format!("StreamServiceCtl.{method} 调用失败：{e}"))?;
+    Ok(())
 }
 
 // ─────────────────────────────────────────────

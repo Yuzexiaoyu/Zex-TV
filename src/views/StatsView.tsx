@@ -14,7 +14,8 @@ const NAV_IDX = 1;
 
 // 焦点组必须在视图顶层注册：空态/加载态没有 ColSection，组若跟着消失，
 // 方向键就落在已注销的组上——count=0 且无 leave，遥控器像死机。
-// 顶层注册见 StatsView 主体（空组 + leave），ColSection 内的注册会覆盖它
+// 只在 StatsView 主体注册一处（count 由数据实时反算），ColSection 不再重复注册：
+// 同名组两处注册会互相覆盖，且父组件 effect 后跑，会用 count=0 盖掉真实列表。
 
 function ColSection() {
   const t = useT();
@@ -24,27 +25,9 @@ function ColSection() {
   const d = stats?.video;
   const top = d?.top ?? [];
 
-  useGamepadGroup(GROUP, {
-    count: top.length,
-    cols: 1,
-    scrollIntoView: (i) => {
-      document.querySelector(`[data-stat-cover="video-${i}"]`)?.scrollIntoView({ block: 'nearest', behavior: 'auto' });
-    },
-    activate: () => {},
-    leave: (dir) => {
-      if (dir === 'up') useFocusStore.getState().switchTo('nav', NAV_IDX);
-    },
-  });
-
-  // 数据刷新后排行变短时，栈里的焦点索引可能越界（无高亮、按键像失灵）
-  useEffect(() => {
-    const s = useFocusStore.getState();
-    const cur = s.stack[s.stack.length - 1];
-    if (cur?.group !== GROUP) return;
-    if (cur.index != null && cur.index >= top.length) {
-      s.switchTo(GROUP, Math.max(0, top.length - 1));
-    }
-  }, [top.length]);
+  // 焦点组只在 StatsView 顶层注册一处（见下）：两处注册同名组会互相覆盖，而且
+  // 父组件 effect 比子组件后跑 → 顶层那次（count 0）会把这里 count=top.length 盖掉，
+  // 结果列表「往下只能停在第一项」。这里只读焦点高亮，不再重复注册。
 
   if (!stats || !d) return null;
 
@@ -86,16 +69,30 @@ export default function StatsView() {
   const loadStats = useAppStore((s) => s.loadStats);
   const [error, setError] = useState<string | null>(null);
 
-  // 顶层兜底注册：无数据/加载中/出错时 ColSection 不渲染，组不能消失，
-  // 否则落到本页的焦点变成「空组」——上下全哑，「上」也回不了导航
+  // 焦点组唯一注册处：StatsView 常驻（空态/加载/出错也在），count 由数据实时反算，
+  // ColSection 不再重复注册（否则同名组互相覆盖，列表往下停不动）。
+  const top = stats?.video?.top ?? [];
   useGamepadGroup(GROUP, {
-    count: 0,
+    count: top.length,
     cols: 1,
+    scrollIntoView: (i) => {
+      document.querySelector(`[data-stat-cover="video-${i}"]`)?.scrollIntoView({ block: 'nearest', behavior: 'auto' });
+    },
     activate: () => {},
     leave: (dir) => {
       if (dir === 'up') useFocusStore.getState().switchTo('nav', NAV_IDX);
     },
   });
+
+  // 数据刷新后排行变短时，栈里的焦点索引可能越界（无高亮、按键像失灵）
+  useEffect(() => {
+    const s = useFocusStore.getState();
+    const cur = s.stack[s.stack.length - 1];
+    if (cur?.group !== GROUP) return;
+    if (cur.index != null && cur.index >= top.length) {
+      s.switchTo(GROUP, Math.max(0, top.length - 1));
+    }
+  }, [top.length]);
 
   useEffect(() => {
     setError(null);

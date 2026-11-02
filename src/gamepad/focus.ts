@@ -28,6 +28,9 @@ export interface GroupOpts {
   exit?: () => void;
   /** 左/右键在行内切换时优先调用（如设置页的 chips 开/关）；返回 true 表示已消费、不移动行 */
   horizontal?: (dir: 'left' | 'right', index: number) => boolean;
+  /** 左右到行首/行尾时环形回绕到本行另一端（而非越界走 leave）。海报行用，
+   *  让遥控器能从末张按右直接绕到首张、首张按左绕到末张 */
+  wrap?: boolean;
 }
 
 interface FocusItem {
@@ -196,14 +199,19 @@ export const useFocusStore = create<FocusStore>((set, get) => ({
         case 'down':
           if (row < lastRow) next = Math.min(count - 1, index + cols); else crossed = true;
           break;
-        // 左右在行内移动：行首按左 / 行尾按右 = 越界走 leave（跨组跳转或原地停留）。
+        // 左右在行内移动：行首按左 / 行尾按右 = 越界。opts.wrap 的组（海报行）环形
+        // 回绕到本行另一端；否则走 leave（跨组跳转或原地停留）。
         // 之前只有 up/down 两个 case——nav（横向单行）、海报墙、hero 按钮组、
         // 工具栏 chips 的左右键全部无声无息，电视上横向导航整个是死的
         case 'left':
-          if (index % cols > 0) next = index - 1; else crossed = true;
+          if (index % cols > 0) next = index - 1;
+          else if (opts.wrap) next = Math.min(count - 1, row * cols + cols - 1);
+          else crossed = true;
           break;
         case 'right':
-          if (index % cols < cols - 1 && index < count - 1) next = index + 1; else crossed = true;
+          if (index % cols < cols - 1 && index < count - 1) next = index + 1;
+          else if (opts.wrap) next = row * cols;
+          else crossed = true;
           break;
       }
     } else {

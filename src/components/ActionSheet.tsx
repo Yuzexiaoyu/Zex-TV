@@ -40,7 +40,7 @@ export default function ActionSheet({ title, subtitle, items, initialIndex = 0, 
 
   return (
     <div className="fixed inset-0 z-[250] flex items-center justify-center p-8">
-      <div className="absolute inset-0 bg-black/70 backdrop-blur-sm animate-fade-in" />
+      <div className="absolute inset-0 bg-black/75 animate-fade-in" />
       <div className="relative glass-modal shadow-2xl animate-scale-in px-7 py-6 flex flex-col gap-4 min-w-[400px] max-w-[560px]">
         <div className="flex flex-col gap-1 px-2">
           <h2 className="text-xl font-bold truncate">{title}</h2>

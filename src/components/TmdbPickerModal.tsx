@@ -30,7 +30,7 @@ export default function TmdbPickerModal({ title, results, currentId, onPick, onC
 
   return (
     <div className="fixed inset-0 z-[300] flex items-center justify-center p-8" onClick={onClose}>
-      <div className="absolute inset-0 bg-black/75 backdrop-blur-md animate-fade-in" />
+      <div className="absolute inset-0 bg-black/80 animate-fade-in" />
 
       <div
         className="relative w-full max-w-4xl max-h-full flex flex-col glass-modal shadow-2xl animate-scale-in overflow-hidden"

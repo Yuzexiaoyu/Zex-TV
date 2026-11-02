@@ -94,6 +94,10 @@ export async function markSeasonWatched(seasonId: string, watched: boolean): Pro
   return invoke('mark_season_watched', { seasonId, watched });
 }
 
+export async function markEpisodesWatched(episodeIds: string[], watched: boolean): Promise<void> {
+  return invoke('mark_episodes_watched', { episodeIds, watched });
+}
+
 export async function touchEpisodePlayed(episodeId: string): Promise<void> {
   return invoke('touch_episode_played', { episodeId });
 }
@@ -168,4 +172,14 @@ export async function playEpisode(episodeId: string): Promise<void> {
 // 有 → 返回 episode id 并清空（一次回执）；无 → null
 export async function takeCurrentEpisode(): Promise<string | null> {
   return invoke('take_current_episode');
+}
+
+// 肃正协议：手动触发一次跨端进度对账（设置里保存核心位置后立即同步一次）
+export async function triggerSync(): Promise<void> {
+  return invoke('trigger_sync');
+}
+
+// 肃正协议：关闭同步时删掉 NAS 上的核心文件
+export async function syncPurge(): Promise<void> {
+  return invoke('sync_purge');
 }

@@ -4,10 +4,10 @@
 // 上下只在板块内移动（越顶回导航）；左右只在两板块之间切换，各板块记住自己的焦点行。
 
 import { useEffect, useState } from 'react';
-import { Server, Plus, Trash2, Loader2, Key, Globe, Languages, Check, Pencil, Eraser } from 'lucide-react';
+import { Server, Plus, Trash2, Loader2, Key, Globe, Languages, Check, Pencil, Eraser, RefreshCw, Folder, EyeOff } from 'lucide-react';
 import { clsx } from 'clsx';
 import * as api from '../api';
-import type { SmbServer } from '../types';
+import type { SmbServer, SmbShareInfo } from '../types';
 import { useFocusIndex, useGamepadGroup, useFocusStore, useModalGamepad } from '../gamepad';
 import { useT, useLang, setLang, LANGUAGES, type Lang } from '../i18n';
 import { useAppStore } from '../store';
@@ -30,12 +30,24 @@ export default function SettingsView() {
   const [clearAsk, setClearAsk] = useState<number | null>(null);
   const [clearing, setClearing] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
+  // 肃正协议配置（右列最下方一块 + 弹窗）
+  const [syncOpen, setSyncOpen] = useState(false);
+  const [syncEnabled, setSyncEnabled] = useState(true);
+  const [syncShare, setSyncShare] = useState('');
+  const [syncDir, setSyncDir] = useState('');
+
+  const loadSyncCfg = () => {
+    void api.getSetting('sync_enabled').then((v) => setSyncEnabled(v !== '0')).catch(() => {});
+    void api.getSetting('sync_share').then((v) => setSyncShare(v ?? '')).catch(() => {});
+    void api.getSetting('sync_dir').then((v) => setSyncDir(v ?? '')).catch(() => {});
+  };
 
   useEffect(() => {
     void api.getSetting('tmdb_api_key').then((v) => setTmdbKey(v ?? '')).catch(() => {});
     void api.getSetting('http_proxy').then((v) => setProxy(v ?? '')).catch(() => {});
     void api.getSmbServers().then(setServers).catch(() => {});
     void api.getVersion().then(setVersion).catch(() => {});
+    loadSyncCfg();
   }, []);
 
   // ─── 左模块：添加 NAS → NAS 列表 → 删除 ─────────
@@ -46,12 +58,14 @@ export default function SettingsView() {
   const nasTotal = deleteStart + servers.length;
   const deleteIdx = (i: number) => deleteStart + i;
 
-  // ─── 右板块：TMDB → 代理 → 语言 → 清除数据（纵向）─────────
-  const R = { tmdb: 0, proxy: 1, lang: 2, clear: 3 } as const;
-  const rightTotal = 4;
+  // ─── 右板块：TMDB → 代理 → 语言 → 隐藏品牌 → 清除数据 → 肃正协议（纵向）─────────
+  const R = { tmdb: 0, proxy: 1, lang: 2, hideBrand: 3, clear: 4, sync: 5 } as const;
+  const rightTotal = 6;
 
   const nasFocused = useFocusIndex('settings:nas');
   const rightFocused = useFocusIndex('settings:right');
+  const hideBrand = useAppStore((s) => s.hideBrand);
+  const setHideBrand = useAppStore((s) => s.setHideBrand);
   // 两个大模块各自记住最后一行；左右切换时只读取目标模块的位置。
   const [lastNasRow, setLastNasRow] = useState(0);
   const [lastRightRow, setLastRightRow] = useState(0);
@@ -104,8 +118,12 @@ export default function SettingsView() {
         document.querySelector<HTMLInputElement>('[data-set-input="proxy"]')?.focus();
       } else if (i === R.lang) {
         setLang(lang === 'zh' ? 'en' : 'zh');
+      } else if (i === R.hideBrand) {
+        setHideBrand(!hideBrand);
       } else if (i === R.clear) {
         void askClear();
+      } else if (i === R.sync) {
+        setSyncOpen(true);
       }
     },
     scrollIntoView: () => {},
@@ -285,11 +303,30 @@ export default function SettingsView() {
             </div>
           </section>
 
-          {/* 数据：清除全部影视。flex-1 放在这块——它是右列最后一块，
-              让它吃掉剩余空间，整列高度就恰好铺满一屏，不会溢出 */}
+          {/* 隐藏品牌：隐藏左上角 Logo 与「ZEX」，开启后导航移到最左 */}
+          <section
+            data-set-item={`right-${R.hideBrand}`}
+            className={clsx('set-section', rightFocused === R.hideBrand && 'gamepad-focus-target')}
+          >
+            <div className="set-section-head">
+              <EyeOff size={18} className="text-[#00d4ff]" />
+              <span className="text-lg font-semibold">{t('settings.hideBrand')}</span>
+              <button
+                onClick={() => setHideBrand(!hideBrand)}
+                className={clsx('chip text-base ml-auto', hideBrand && 'active', rightFocused === R.hideBrand && 'gamepad-focus')}
+              >
+                {hideBrand && <Check size={15} />}
+                {hideBrand ? t('common.on') : t('common.off')}
+              </button>
+            </div>
+            <p className="mt-1.5 text-sm text-text-tertiary leading-snug">{t('settings.hideBrandHint')}</p>
+          </section>
+
+          {/* 数据：清除全部影视。按内容自适应高度（不再 flex-1 撑满，否则这块空框
+              会被拉得很大）；右列底部留白即可 */}
           <section
             data-set-item={`right-${R.clear}`}
-            className={clsx('set-section flex-1 min-h-0 flex flex-col', rightFocused === R.clear && 'gamepad-focus-target')}
+            className={clsx('set-section', rightFocused === R.clear && 'gamepad-focus-target')}
           >
             <div className="set-section-head">
               <Eraser size={18} className="text-[#00d4ff]" />
@@ -306,6 +343,33 @@ export default function SettingsView() {
             >
               {clearing ? <Loader2 size={15} className="animate-spin" /> : <Trash2 size={15} />}
               {clearing ? t('settings.clearing') : t('settings.clearAll')}
+            </button>
+          </section>
+
+          {/* 肃正协议：跨端进度同步，放右列最下方。核心位置由用户指定（点开弹窗配置） */}
+          <section
+            data-set-item={`right-${R.sync}`}
+            className={clsx('set-section', rightFocused === R.sync && 'gamepad-focus-target')}
+          >
+            <div className="set-section-head">
+              <RefreshCw size={18} className="text-[#00d4ff]" />
+              <span className="text-lg font-semibold">{t('settings.sync')}</span>
+              <span className={clsx('ml-auto text-sm', syncEnabled && syncShare ? 'text-green-400' : 'text-text-tertiary')}>
+                {syncEnabled ? t('common.on') : t('common.off')}
+              </span>
+            </div>
+            <button
+              onClick={() => setSyncOpen(true)}
+              className={clsx('nas-row w-full mt-2 text-left', rightFocused === R.sync && 'gamepad-focus')}
+            >
+              <Folder size={16} className="text-[#a855f7] shrink-0" />
+              <span className="flex-1 min-w-0 truncate text-sm">
+                {!syncEnabled
+                  ? t('settings.syncOff')
+                  : syncShare
+                    ? t('settings.syncCurrent', { loc: syncShare })
+                    : t('settings.syncNotSet')}
+              </span>
             </button>
           </section>
         </div>
@@ -326,6 +390,16 @@ export default function SettingsView() {
           count={clearAsk}
           onCancel={() => setClearAsk(null)}
           onConfirm={() => void doClear()}
+        />
+      )}
+
+      {/* 肃正协议配置弹窗：开关 + 选核心位置（共享 + 子目录） */}
+      {syncOpen && (
+        <SyncConfigModal
+          servers={servers}
+          initial={{ enabled: syncEnabled, share: syncShare, dir: syncDir }}
+          onClose={() => setSyncOpen(false)}
+          onSaved={(msg) => { setSyncOpen(false); loadSyncCfg(); setToast(msg); }}
         />
       )}
 
@@ -372,7 +446,7 @@ function ClearConfirmModal({
 
   return (
     <div className="fixed inset-0 z-[260] flex items-center justify-center p-8" onClick={onCancel}>
-      <div className="absolute inset-0 bg-black/75 backdrop-blur-md animate-fade-in" />
+      <div className="absolute inset-0 bg-black/80 animate-fade-in" />
       <div
         className="relative w-full max-w-lg glass-modal shadow-2xl animate-scale-in p-7"
         onClick={(e) => e.stopPropagation()}
@@ -477,7 +551,7 @@ function NasEditModal({ server, onClose, onSaved }: {
 
   return (
     <div className="fixed inset-0 z-[250] flex items-center justify-center p-8" onClick={onClose}>
-      <div className="absolute inset-0 bg-black/75 backdrop-blur-md animate-fade-in" />
+      <div className="absolute inset-0 bg-black/80 animate-fade-in" />
       <div
         className="relative w-full max-w-lg glass-modal shadow-2xl animate-scale-in overflow-hidden"
         onClick={(e) => e.stopPropagation()}
@@ -579,6 +653,156 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
     <div>
       <label className="text-sm text-text-secondary block mb-2">{label}</label>
       {children}
+    </div>
+  );
+}
+
+// ─── 肃正协议配置弹窗 ────────────────────────
+// 焦点：0=开关，1..N=共享（选核心文件放哪个共享），N+1=子目录输入，N+2=保存，N+3=取消。
+function SyncConfigModal({ servers, initial, onClose, onSaved }: {
+  servers: SmbServer[];
+  initial: { enabled: boolean; share: string; dir: string };
+  onClose: () => void;
+  onSaved: (msg: string) => void;
+}) {
+  const t = useT();
+  const server = servers[0]; // 默认用第一台 NAS（出厂就一台）
+  const [enabled, setEnabled] = useState(initial.enabled);
+  const [share, setShare] = useState(initial.share);
+  const [btnSel, setBtnSel] = useState<'cancel' | 'save'>('save'); // 底部按钮行内的左右选中项
+  const [shares, setShares] = useState<SmbShareInfo[]>([]);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!server) return;
+    void api.listSmbShares(server.id).then(setShares).catch(() => {});
+  }, [server]);
+
+  const N = enabled ? shares.length : 0; // 关闭时不列共享（下方隐藏），焦点也随之收缩
+  // 焦点：开关 → 各共享 → 底部按钮行（整行一个焦点，左右键选取消/保存）
+  const F = { enable: 0, shareBase: 1, buttons: N + 1 };
+  const total = N + 2;
+  const focused = useFocusIndex('modal:sync-config');
+
+  const save = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      await api.setSetting('sync_enabled', enabled ? '1' : '0');
+      await api.setSetting('sync_share', share.trim());
+      await api.setSetting('sync_dir', ''); // 核心文件放共享根，不再用子目录
+      if (server) await api.setSetting('sync_server_id', server.id);
+      // 开 → 立即对账建/更文件；关 → 删掉 NAS 上的核心文件
+      if (enabled) await api.triggerSync();
+      else await api.syncPurge();
+      onSaved(enabled ? t('settings.syncSaved') : t('settings.syncDisabled'));
+    } catch (err) {
+      setError(String(err));
+      setBusy(false);
+    }
+  };
+
+  useModalGamepad('modal:sync-config', {
+    onClose: () => { if (!busy) onClose(); },
+    count: total,
+    cols: 1,
+    // 底部按钮行：整行一个焦点，左右键切取消/保存；上下键则整行移动（上→上一行）
+    horizontal: (dir, i) => {
+      if (i === F.buttons) { setBtnSel(dir === 'left' ? 'cancel' : 'save'); return true; }
+      return false;
+    },
+    activate: (i) => {
+      if (busy) return;
+      if (i === F.enable) { setEnabled((v) => !v); return; }
+      if (i >= F.shareBase && i < F.buttons) { setShare(shares[i - F.shareBase]?.name ?? ''); return; }
+      if (i === F.buttons) { if (btnSel === 'save') void save(); else onClose(); return; }
+    },
+    scrollIntoView: (i) => {
+      document.querySelector(`[data-sync-item="${i}"]`)?.scrollIntoView({ block: 'nearest' });
+    },
+  });
+
+  // 共享加载后项数变化，越界焦点收回开关项
+  useEffect(() => {
+    const s = useFocusStore.getState();
+    const top = s.stack[s.stack.length - 1];
+    if (top?.group !== 'modal:sync-config') return;
+    if (top.index != null && top.index >= total) s.switchTo('modal:sync-config', 0);
+  }, [total]);
+
+  return (
+    <div className="fixed inset-0 z-[250] flex items-center justify-center p-8" onClick={() => { if (!busy) onClose(); }}>
+      <div className="absolute inset-0 bg-black/80 animate-fade-in" />
+      <div className="relative w-full max-w-3xl glass-modal shadow-2xl animate-scale-in overflow-hidden" onClick={(e) => e.stopPropagation()}>
+        <div className="px-7 py-6 border-b border-border-glass">
+          <h2 className="text-xl font-bold flex items-center gap-2">
+            <RefreshCw size={20} className="text-[#00d4ff]" />
+            {t('settings.syncConfigTitle')}
+          </h2>
+          <p className="mt-1.5 text-sm text-text-secondary">{t('settings.syncHint')}</p>
+        </div>
+        <div className="p-7 space-y-4 max-h-[78vh] overflow-y-auto">
+          {!server ? (
+            <p className="text-base text-text-secondary text-center py-4">{t('settings.syncNoServer')}</p>
+          ) : (
+            <>
+              {/* 开关 */}
+              <button
+                data-sync-item={F.enable}
+                onClick={() => setEnabled((v) => !v)}
+                className={clsx('add-pick-row w-full', focused === F.enable && 'gamepad-focus')}
+              >
+                <RefreshCw size={18} className={enabled ? 'text-green-400' : 'text-text-tertiary'} />
+                <span className="flex-1 text-left text-base">{t('settings.syncEnabled')}</span>
+                <span className={clsx('text-sm', enabled ? 'text-green-400' : 'text-text-tertiary')}>
+                  {enabled ? t('common.on') : t('common.off')}
+                </span>
+              </button>
+
+              {/* 选共享（核心文件放哪个共享里）。关闭同步时整块隐藏 */}
+              {enabled && (
+                <div>
+                  <label className="text-sm text-text-secondary block mb-2">{t('settings.syncPickShare')}</label>
+                  <div className="space-y-2">
+                    {shares.map((s, i) => (
+                      <button
+                        key={s.name}
+                        data-sync-item={F.shareBase + i}
+                        onClick={() => setShare(s.name)}
+                        className={clsx('add-pick-row w-full', focused === F.shareBase + i && 'gamepad-focus')}
+                      >
+                        <Folder size={18} className="text-[#a855f7]" />
+                        <span className="flex-1 text-left text-base truncate">{s.name}</span>
+                        {share === s.name && <Check size={16} className="text-[#00d4ff]" />}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+              {error && <p className="text-sm text-red-400">{error}</p>}
+
+              {/* 取消（左）/ 保存并同步（右）：整行一个焦点，左右键选、上键回上一行 */}
+              <div data-sync-item={F.buttons} className="flex items-center gap-3 pt-1">
+                <button
+                  onClick={onClose}
+                  className={clsx('btn btn-glass px-5 py-3 text-base', focused === F.buttons && btnSel === 'cancel' && 'gamepad-focus')}
+                >
+                  {t('common.cancel')}
+                </button>
+                <button
+                  onClick={() => void save()}
+                  disabled={busy}
+                  className={clsx('btn btn-accent ml-auto px-6 py-3 text-base gap-2', focused === F.buttons && btnSel === 'save' && 'gamepad-focus')}
+                >
+                  {busy ? <Loader2 size={18} className="animate-spin" /> : <RefreshCw size={16} />}
+                  {t('settings.syncSaveAndSync')}
+                </button>
+              </div>
+            </>
+          )}
+        </div>
+      </div>
     </div>
   );
 }
