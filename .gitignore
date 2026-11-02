@@ -27,6 +27,7 @@ src-tauri/gen/schemas/
 ZEX-TV.apk
 .freebuff/
 .tmp-cap/
+.workbuddy/
 
 # Node
 node_modules
